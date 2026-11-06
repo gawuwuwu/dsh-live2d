@@ -6,7 +6,7 @@
 
 > 本仓库**不含任何 Live2D 模型与语音素材**（版权与隐私原因）。首次安装后请选择你自己的模型目录。
 >
-> 版本变更记录见 [CHANGELOG.md](./CHANGELOG.md)；设计细节在 `docs/`。
+> 版本变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ---
 
