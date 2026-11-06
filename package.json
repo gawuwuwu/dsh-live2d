@@ -1,0 +1,42 @@
+{
+  "name": "dsh-live2d",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "description": "DSH Live2D 模型接入：多实例透明置顶窗口、气泡/对话、三模式（AI 自动 / AI 半自动 / 手动）、主动唤醒、读屏、语音、动作与预设",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "electron",
+    "README.md",
+    "tests",
+    "tools"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "slots"
+      ],
+      "external": [
+        "react"
+      ]
+    }
+  }
+}

@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'unsafe-inline'; img-src 'self' data: live2d-asset:; font-src 'self'; media-src 'self' data:; connect-src 'self' live2d-asset: data:">
+<!--
+  'unsafe-eval' 是 pixi.js 7 的硬要求：它的着色器/滤镜用 new Function 生成，
+  没有它会在启动时报 "Current environment does not allow unsafe-eval"。
+  这个页面只加载本地的 vendor 与 live2d-asset://（限目录、限扩展名），
+  不加载任何远程内容，也不开放 nodeIntegration，因此可接受。
+  （替代方案是再内置 @pixi/unsafe-eval，但那需要额外 vendor 文件，收益很小。）
+-->
+<title>Live2D 窗口</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    /* 显式带 emoji 字体：之前只写 Segoe UI，气泡里的 😊 会掉成方块/空白 */
+    font: 12px/1.5 "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "Segoe UI Emoji", "Noto Color Emoji", "Apple Color Emoji", system-ui, sans-serif;
+    color: #1e2433;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #stage {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  /* 透明区默认不拦截鼠标（由 renderer 动态切换 setIgnoreMouseEvents） */
+  #toolbar {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 30; /* 必须高于调整框，否则编辑时点不到置顶/关闭 */
+    display: flex;
+    max-width: calc(100% - 12px);
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 6px;
+    /* 保持低透明度常显：模型区穿透或窗口失焦时也不会“找不到关闭/置顶” */
+    opacity: .62;
+    pointer-events: auto;
+    transition: opacity .18s ease;
+  }
+  body:hover #toolbar { opacity: 1; }
+
+  /* 0.13.0：模式按钮显示当前模式文字，⚡ 唤醒进行中置灰 */
+  #mode-cycle {
+    min-width: 54px;
+    padding: 0 8px;
+    font-size: 11px;
+    letter-spacing: .02em;
+  }
+  #wake.busy { opacity: .5; }
+  #toolbar button {
+    -webkit-app-region: no-drag;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    font: inherit;
+    font-size: 13px;
+    line-height: 1;
+    color: #eef2ff;
+    background: rgba(30, 38, 60, .72);
+    border: 1px solid rgba(255, 255, 255, .18);
+    border-radius: 8px;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+  }
+  #toolbar button:hover { background: rgba(50, 62, 96, .86); }
+  #toolbar button.danger:hover { background: rgba(180, 46, 66, .86); }
+  /* 调整模式开启：按钮高亮，提醒「现在鼠标在拖窗口，不是摸模型」 */
+  #toolbar button.active {
+    background: rgba(96, 140, 255, .9);
+    border-color: rgba(170, 200, 255, .9);
+    box-shadow: 0 0 0 1px rgba(120, 165, 255, .45), 0 2px 8px rgba(40, 90, 220, .35);
+  }
+  /* 悬停时也要保持「已开启」的蓝色，否则一划过去就像关掉了 */
+  #toolbar button.active:hover { background: rgba(112, 156, 255, .96); }
+
+  /* 会话标题小标签：左上角，和右上角工具栏对称；已绑定也常显（略淡），hover 加深，未绑定最醒目 */
+  #instance-title {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 25;
+    max-width: calc(100% - 96px);
+    padding: 3px 8px;
+    border-radius: 8px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: rgba(240, 246, 255, .92);
+    background: rgba(30, 38, 60, .55);
+    border: 1px solid rgba(255, 255, 255, .14);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    -webkit-app-region: drag;
+    opacity: .62;
+    transition: opacity .18s ease;
+    pointer-events: none;
+  }
+  body:hover #instance-title { opacity: .95; }
+  #instance-title.unbound { opacity: 1; }
+
+  #placeholder {
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    border: 1px solid rgba(140, 160, 200, .45);
+    background: rgba(255, 255, 255, .92);
+    box-shadow: 0 10px 30px rgba(20, 30, 60, .18);
+    backdrop-filter: blur(8px);
+  }
+  #placeholder.hidden { display: none; }
+  #placeholder b { display: block; font-size: 12px; margin-bottom: 4px; }
+  #placeholder span { display: block; font-size: 11px; opacity: .72; word-break: break-all; }
+  #placeholder code { font-size: 10px; opacity: .6; }
+
+  /* 阶段 2 起，所有气泡（手动/测试/对话回复）都走顶部 #reply，这里不再有底部气泡层 */
+
+  /* --- 阶段 1.5：调整框（默认隐藏） --- */
+  #adjust {
+    position: absolute;
+    inset: 0;
+    z-index: 5; /* 低于 #toolbar(30)：编辑时也要能点置顶/关闭 */
+    border: 1px dashed rgba(96, 140, 255, .9);
+    pointer-events: none;
+  }
+  #adjust.hidden { display: none; }
+  #adjust .handle {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    background: #fff;
+    border: 1px solid rgba(70, 110, 220, .95);
+    border-radius: 3px;
+    pointer-events: auto;
+    box-shadow: 0 1px 4px rgba(10, 20, 45, .35);
+  }
+  #adjust .handle[data-dir="n"] { top: -6px; left: calc(50% - 6px); cursor: ns-resize; }
+  #adjust .handle[data-dir="s"] { bottom: -6px; left: calc(50% - 6px); cursor: ns-resize; }
+  #adjust .handle[data-dir="e"] { right: -6px; top: calc(50% - 6px); cursor: ew-resize; }
+  #adjust .handle[data-dir="w"] { left: -6px; top: calc(50% - 6px); cursor: ew-resize; }
+  #adjust .handle[data-dir="nw"] { top: -6px; left: -6px; cursor: nwse-resize; }
+  #adjust .handle[data-dir="ne"] { top: -6px; right: -6px; cursor: nesw-resize; }
+  #adjust .handle[data-dir="sw"] { bottom: -6px; left: -6px; cursor: nesw-resize; }
+  #adjust .handle[data-dir="se"] { bottom: -6px; right: -6px; cursor: nwse-resize; }
+  #adjust-move {
+    position: absolute;
+    /* 顶部让出工具栏（26px 按钮 + 6px 边距），否则会挡住 📌 / × */
+    left: 16px;
+    right: 16px;
+    top: 40px;
+    bottom: 20px;
+    border-radius: 10px;
+    pointer-events: auto;
+    cursor: move;
+  }
+  #adjust-move.dragging { background: rgba(96, 140, 255, .08); }
+
+  /* --- 预设动作 / 模式选择：浮层菜单 --- */
+  #preset-menu,
+  #mode-menu {
+    position: absolute;
+    z-index: 60;
+    min-width: 150px;
+    max-width: 220px;
+    max-height: 72%;
+    overflow-y: auto;
+    padding: 6px;
+    border-radius: 10px;
+    border: 1px solid rgba(120, 150, 220, .45);
+    background: rgba(24, 30, 48, .97);
+    color: #eaf1ff;
+    font-size: 12px;
+    line-height: 1.5;
+    box-shadow: 0 10px 26px rgba(8, 12, 24, .55);
+  }
+  #mode-menu { z-index: 62; min-width: 132px; }
+  #preset-menu.hidden,
+  #mode-menu.hidden { display: none; }
+  #preset-menu .menu-title,
+  #mode-menu .menu-title {
+    padding: 3px 6px;
+    font-size: 10px;
+    opacity: .6;
+    letter-spacing: .5px;
+  }
+  #preset-menu .menu-item,
+  #mode-menu .menu-item {
+    padding: 5px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  #preset-menu .menu-item:hover,
+  #mode-menu .menu-item:hover { background: rgba(96, 140, 255, .35); }
+  #mode-menu .menu-item.chosen { color: #9fc2ff; }
+  #preset-menu .menu-item .tag,
+  #mode-menu .menu-item .tag { opacity: .55; font-size: 10px; }
+  #preset-menu .menu-sep,
+  #mode-menu .menu-sep { height: 1px; margin: 4px 6px; background: rgba(140, 170, 230, .22); }
+
+  /* --- 阶段 2：窗口内对话 --- */
+  /* 底边固定在「模型顶部 + 6px」：短回答贴底，长回答向上长，永远不压模型。
+     --reply-bottom 由 renderer 按 model.y 实时写入。 */
+  #reply {
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    bottom: var(--reply-bottom, 258px);
+    max-height: min(var(--reply-max-height, 240px), calc(100% - var(--reply-bottom, 258px) - 8px));
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    overflow-y: auto;
+    /* 唯一滚动所有者：滚轮/角标/滚动条都在这层；穿透由 renderer 的命中检测统一控制 */
+    pointer-events: auto;
+    z-index: 22;
+    scrollbar-width: none; /* 原生 overlay 条在 Electron 里画不出来，改用 .reply-scroller 自绘 */
+  }
+  /* 内容不足时把第一条推到底部（flex 的 auto margin），
+     内容超出时 auto 归零、正常从顶部滚动 */
+  #reply > .reply-wrap:first-child { margin-top: auto; }
+  #reply::-webkit-scrollbar { display: none; }
+  /* 气泡外层：自绘滚动条挂在这里（不随内容滚动） */
+  .reply-wrap { position: relative; flex: 0 0 auto; }
+  .reply-wrap.leaving { opacity: 0; transition: opacity .26s ease; }
+  /* 自绘滚动条：Windows/Electron 的 overlay 滚动条会忽略 ::-webkit-scrollbar */
+  .scrollbar {
+    position: absolute;
+    right: 1px;
+    top: 8px;
+    bottom: 8px;
+    width: 5px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, .22);
+    pointer-events: none;
+    display: none;
+  }
+  /* 容器级自绘条：挂在 body，position:fixed（不随 #reply 内容滚动） */
+  .scrollbar.reply-scroller {
+    position: fixed;
+    right: auto;
+    top: 0;
+    bottom: auto;
+    height: 60px;
+    width: 6px;
+    z-index: 30; /* 必须高于 #reply(22)，否则自绘条被回答区盖住 */
+    pointer-events: none;
+  }
+
+  .scrollbar .thumb {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    border-radius: 2px;
+    background: rgba(195, 220, 255, .95);
+  }
+  .reply-item {
+    pointer-events: auto;
+    box-sizing: border-box;
+    font-size: var(--reply-font-size, 13px);
+    line-height: 1.55;
+    word-break: break-word;
+    white-space: pre-wrap;
+    /* 0.12.4 起由 #reply 统一滚动，气泡自身不再设 max-height/overflow */
+    padding-right: 6px;
+    animation: reply-in .18s ease;
+  }
+  /* Markdown 结构（渲染层只用 DOM API 构造，这里只管排版） */
+  .reply-item > p { margin: 0 0 .6em; white-space: pre-wrap; }
+  .reply-item > p:last-child { margin-bottom: 0; }
+  .reply-item > h1, .reply-item > h2, .reply-item > h3 {
+    margin: .2em 0 .4em;
+    font-size: 1.08em;
+    line-height: 1.35;
+  }
+  .reply-item > h1 { font-size: 1.16em; }
+  .reply-item > ul, .reply-item > ol { margin: .2em 0 .6em; padding-left: 1.25em; }
+  .reply-item > li { margin: .12em 0; }
+  .reply-item > blockquote {
+    margin: .3em 0 .6em;
+    padding: .2em .6em;
+    border-left: 3px solid rgba(150, 185, 245, .55);
+    background: rgba(120, 155, 220, .12);
+    border-radius: 4px;
+  }
+  .reply-item > pre {
+    margin: .3em 0 .6em;
+    padding: 6px 8px;
+    background: rgba(10, 16, 30, .5);
+    border-radius: 6px;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .reply-item > pre code { font-size: .94em; white-space: pre; }
+  .reply-item code {
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: rgba(140, 170, 230, .18);
+    font-size: .95em;
+  }
+  .reply-item > hr {
+    margin: .5em 0;
+    border: 0;
+    border-top: 1px solid rgba(160, 190, 240, .3);
+  }
+  /* 语音还在合成：气泡顶部提示一句，避免用户以为没声音 */
+  .reply-item.speech-pending::before {
+    content: '语音合成中…';
+    display: block;
+    margin-bottom: 3px;
+    font-size: 10px;
+    line-height: 1.4;
+    opacity: .7;
+    letter-spacing: .2px;
+  }
+  @keyframes reply-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  /* 气泡样式（类名不能叫 .bubble：会和底部短气泡的 opacity:0 规则冲突） */
+  .reply-item.bubble-style {
+    align-self: flex-start;
+    max-width: 94%;
+    padding: 9px 12px;
+    border-radius: 14px;
+    border: 1px solid rgba(120, 150, 220, .35);
+    background: rgba(30, 38, 62, var(--reply-opacity, .9));
+    color: #f2f6ff;
+    box-shadow: 0 8px 22px rgba(12, 18, 36, .35);
+  }
+  .reply-item.leaving { opacity: 0; transition: opacity .26s ease; }
+  /* 「↕ 还有约 N 字」：sticky 在 #reply 底部（滚动容器内唯一来源），不随内容滚走 */
+  .more-badge {
+    position: sticky;
+    bottom: 4px;
+    align-self: flex-end;
+    margin-top: -16px;
+    padding: 1px 6px;
+    font-size: 10px;
+    line-height: 1.5;
+    color: rgba(210, 228, 255, .95);
+    background: rgba(22, 30, 52, .9);
+    border-radius: 8px;
+    pointer-events: none;
+    z-index: 2;
+  }
+  .more-badge.speech-truncated {
+    align-self: flex-start;
+    margin-top: 2px;
+    color: rgba(255, 226, 180, .95);
+    background: rgba(60, 46, 20, .9);
+  }
+  /* 方块卡片样式 */
+  .reply-item.card {
+    align-self: stretch;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid rgba(140, 160, 200, .5);
+    background: rgba(255, 255, 255, var(--reply-opacity, .95));
+    color: #1e2433;
+    box-shadow: 0 10px 24px rgba(20, 30, 60, .22);
+  }
+  .reply-item.error {
+    border-color: rgba(220, 90, 100, .6);
+    background: rgba(90, 26, 36, .92);
+    color: #ffe8ea;
+  }
+  .reply-item.loading { opacity: .75; font-style: italic; }
+
+  #composer {
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    z-index: 26;
+  }
+  #composer input {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 32px;
+    padding: 0 10px;
+    border-radius: 10px;
+    border: 1px solid rgba(120, 150, 220, .5);
+    background: rgba(255, 255, 255, .94);
+    color: #1e2433;
+    font: inherit;
+    font-size: 12px;
+    outline: none;
+  }
+  #composer input:focus { border-color: rgba(96, 140, 255, .95); }
+  #composer button {
+    flex: 0 0 auto;
+    height: 32px;
+    padding: 0 12px;
+    border-radius: 10px;
+    border: none;
+    background: rgba(64, 110, 220, .92);
+    color: #fff;
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #composer button:disabled { opacity: .5; cursor: default; }
+</style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+
+  <div id="instance-title" class="unbound">未绑定会话</div>
+
+  <div id="placeholder" class="hidden">
+    <b id="placeholder-title">Live2D</b>
+    <span id="placeholder-detail">-</span>
+  </div>
+
+  <div id="reply"></div>
+
+  <div id="composer">
+    <input id="chat-input" type="text" placeholder="和她说点什么…" maxlength="2000" autocomplete="off" spellcheck="false">
+    <button id="chat-send" type="button">发送</button>
+  </div>
+
+  <div id="adjust" class="hidden">
+    <div id="adjust-move" title="拖动移动窗口"></div>
+    <div class="handle" data-dir="n"></div>
+    <div class="handle" data-dir="s"></div>
+    <div class="handle" data-dir="e"></div>
+    <div class="handle" data-dir="w"></div>
+    <div class="handle" data-dir="nw"></div>
+    <div class="handle" data-dir="ne"></div>
+    <div class="handle" data-dir="sw"></div>
+    <div class="handle" data-dir="se"></div>
+  </div>
+
+  <div id="toolbar">
+    <button id="adjust-toggle" title="移动/调整（开启后可拖动、缩放窗口；关闭时鼠标与模型互动）">✥</button>
+    <button id="mode-cycle" title="选择模式（点开菜单）">手动 ▾</button>
+    <button id="passthrough" title="模型区穿透：关（开启后模型不拦鼠标）">◐</button>
+    <button id="wake" title="主动唤醒：让它看一眼你的屏幕，然后主动跟你说句话">⚡</button>
+    <button id="pin" title="切换置顶">📌</button>
+    <button id="close" class="danger" title="关闭窗口">×</button>
+  </div>
+
+  <div id="mode-menu" class="hidden"></div>
+
+  <div id="preset-menu" class="hidden"></div>
+
+  <script src="./renderer.js"></script>
+</body>
+</html>

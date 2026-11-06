@@ -1,0 +1,18 @@
+# dsh-live2d 的 bundle patch —— 把 Live2D 插件挂进 DSH 配置树
+#
+# 格式说明（照 dsh-pet / dsh-speak-up 的既有约定）：
+#   - insert：往配置树里添加插件行（entry）
+#   - 每行有 id（行标识，patch 覆盖时按它定位）与 name（模块名，解析包入口 index.js）
+#   - id 必须全局唯一；"id: 值"这一行不能写行尾注释（商城预检用正则抓该行）
+#   - package.json 里声明了 dsh.client，DSH 会同时把这个包扫描为浏览器插件，
+#     页面侧从 /plugins/dsh-live2d/client.js 加载
+#
+# 阶段 0A 只需要这一行；config 里的项都是空壳自检用的，后续阶段再加业务参数。
+- insert:
+    - id: dsh-live2d
+      name: 'dsh-live2d'
+      config:
+        enabled: true
+        shellSelfTest: true
+        selfTestTimeoutMs: 3000
+        crashOnLoad: false
