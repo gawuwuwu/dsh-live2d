@@ -355,7 +355,6 @@ node tests\renderer-smoke.mjs   # 渲染层冒烟（起 Electron，约 15 秒）
 dsh-live2d/
 ├─ index.js              宿主半边：实例池 / 模型探测 / 气泡 / 路由 / 窗口进程
 ├─ client.js             网页半边：设置页（动作 / 模型 / 模式）
-├─ lib.js                设置页纯逻辑（toDraft / toPayload，可单测）
 ├─ cordis.patch.yml      插件入口（id: dsh-live2d）
 ├─ electron/
 │  ├─ main.cjs           窗口池、live2d-asset://<instance>、控制通道

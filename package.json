@@ -1,14 +1,36 @@
 {
-  "name": "dsh-live2d",
+  "name": "dsh-live2d-plugin",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
   "main": "index.js",
   "license": "MIT",
+  "author": "gawuwuwu",
+  "description": "Live2D desktop pet for DeepSeek Harness: multi-instance transparent always-on-top windows, chat bubbles, AI-controlled expressions and motions, screen reading, TTS with lip sync, and proactive wake-up.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "live2d",
+    "cubism4",
+    "desktop-pet",
+    "electron",
+    "tts"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gawuwuwu/dsh-live2d.git"
+  },
+  "homepage": "https://github.com/gawuwuwu/dsh-live2d#readme",
+  "bugs": {
+    "url": "https://github.com/gawuwuwu/dsh-live2d/issues"
+  },
   "engines": {
     "node": ">=22"
   },
-  "description": "DSH Live2D 模型接入：多实例透明置顶窗口、气泡/对话、三模式（AI 自动 / AI 半自动 / 手动）、主动唤醒、读屏、语音、动作与预设",
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -20,9 +42,11 @@
     "client.js",
     "cordis.patch.yml",
     "electron",
-    "README.md",
     "tests",
-    "tools"
+    "tools",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
