@@ -6145,12 +6145,16 @@ export function buildWakeMessage(inst, info, source, now = Date.now(), reason = 
   } else if (info?.mode === 'title') {
     lines.push('这次只允许读窗口标题，没有截图。')
   }
-  lines.push('请结合你看到的内容，主动跟我说一两句话（不要复述模板），可以带一点表情/动作。')
+  lines.push('请先根据窗口标题和截图判断用户当前在做什么，再把观察转成陪伴反应；不要只复述画面，也不要套固定模板。')
+  lines.push('场景参考：游戏时像在旁边陪着一样应援、加油、为精彩操作欢呼、失误时安慰；工作/学习/写代码时轻声鼓励并减少打断；看视频或阅读时像一起看一样回应。')
+  lines.push('游戏场景不要居高临下地指挥或连续教用户怎么玩，只用简短自然的话应援；如果信息不足，不要硬猜具体游戏结果。')
+  lines.push('主动跟我说一两句话，并选择与当前场景相符的表情/动作。')
   // 告诉模型它能用哪些工具（不同模式不一样），避免它乱试
   const canAct = canControl(inst, 'anim', { source })
   if (canAct) {
     lines.push('当前模式允许你做表情/动作：')
-    lines.push('- 现成动作：live2d_anim（nod/shake/tilt/happy/shy/surprised/blink/angry/drool/xx/puff）。')
+    lines.push('- 需要同时表达视线、动作和一句话时，优先用 live2d_perform，例如 {lookAt:"user", anim:"happy", text:"这波好稳，继续！", delayMs:300}；比连续调用多个工具更自然。')
+    lines.push('- 只需要单个动作时用 live2d_anim（nod/shake/tilt/happy/shy/surprised/blink/angry/drool/xx/puff）。')
     lines.push('- 现成动作不贴切时，自己设计一个再立刻播：')
     lines.push('  live2d_preset {op:"define", id:"proud", label:"得意", durationMs:1600, tracks:[{param:"headZ", keys:[[0,0],[0.3,12],[0.85,10],[1,0]]},{param:"mouthForm", keys:[[0,0],[0.4,1],[1,0]]}]}')
     lines.push('  live2d_preset {op:"play", action:"proud"}')
@@ -7964,7 +7968,7 @@ export function createLive2dTools(state, log) {
 
   const toolPerform = {
     name: 'live2d_perform',
-    description: '一次性完成一小段有身体感的回应：先看某个方向，再播放动作，延迟后显示气泡（可选自动朗读）。需要把语言、表情和动作连贯表达时优先用这个工具，而不是连续调用多个工具。',
+    description: '一次性完成一小段有身体感的回应：先看某个方向，再播放动作，延迟后显示气泡（可选自动朗读）。适合根据用户当前界面场景做应援、鼓励、安慰或共同反应；需要把语言、表情和动作连贯表达时优先用这个工具，而不是连续调用多个工具。',
     parameters: {
       type: 'object',
       properties: {
