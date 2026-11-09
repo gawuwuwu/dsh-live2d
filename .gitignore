@@ -2,16 +2,21 @@
 node_modules/
 .userdata/
 .drill/
+.tmp/
 *.log
 config.json
 pending/
 backup/
-0.1.0备份/
-.tmp/
 
-# 模型与语音素材不进仓库
+# 模型与语音素材（体积大，且版权归模型作者，不随插件分发）
 *.moc3
 *.model3.json
 *.png
 *.wav
+
+# 但插件自带的渲染库必须进仓库
 !electron/assets/**
+
+# 本机备份目录
+0.1.0备份/
+0.2.0备份/

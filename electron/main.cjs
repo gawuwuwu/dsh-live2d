@@ -12,7 +12,7 @@
 //   · 不加载任何远程内容，只 loadFile 本地 index.html；
 //   · 实测必须带 --no-sandbox（由宿主 spawn 时传入），否则本机启动即 0x80000003。
 
-const { app, BrowserWindow, ipcMain, protocol, screen } = require('electron')
+const { app, BrowserWindow, ipcMain, powerMonitor, protocol, screen } = require('electron')
 const fs = require('node:fs')
 const net = require('node:net')
 const os = require('node:os')
@@ -257,6 +257,48 @@ function applySafeBounds(win, wanted = {}) {
   return win.getBounds()
 }
 
+function stopFollowCursor(entry) {
+  if (entry?.followTimer) clearInterval(entry.followTimer)
+  if (entry) {
+    entry.followTimer = null
+    entry.followUntil = 0
+  }
+}
+
+/**
+ * AI 自动模式的“跟随鼠标”只保持一段固定距离，并始终夹在工作区内。
+ * 用户一拖动/改几何就立即停止，避免夺走鼠标控制权。
+ */
+function startFollowCursor(entry) {
+  stopFollowCursor(entry)
+  entry.followUntil = Date.now() + 20_000
+  const step = () => {
+    if (!entry?.win || entry.win.isDestroyed()) {
+      stopFollowCursor(entry)
+      return
+    }
+    if (Date.now() >= Number(entry.followUntil || 0)) {
+      stopFollowCursor(entry)
+      report({ type: 'bounds', instanceId: entry.instanceId, bounds: entry.win.getBounds(), transient: true, presence: 'follow-timeout' })
+      return
+    }
+    let point
+    try { point = screen.getCursorScreenPoint() } catch { return }
+    const wanted = computeSafeBounds(entry.win, { x: point.x + 72, y: point.y + 48 })
+    try {
+      entry.win.setBounds(wanted)
+      entry.bounds = entry.win.getBounds()
+      report({ type: 'bounds', instanceId: entry.instanceId, bounds: entry.bounds, transient: true, presence: 'follow-cursor' })
+    } catch (error) {
+      log(`${entry.instanceId} follow-cursor failed: ${error && error.message}`)
+      stopFollowCursor(entry)
+    }
+  }
+  step()
+  entry.followTimer = setInterval(step, 420)
+  if (typeof entry.followTimer.unref === 'function') entry.followTimer.unref()
+}
+
 /**
  * 平滑移动：按 ~60fps 逐帧 setBounds，走 easeOutCubic。
  * 直接瞬移会像「传送」，用户要求像拖动一样挪过去（2026-11-05）。
@@ -406,6 +448,7 @@ function createInstanceWindow(instanceId, config = {}, title = '') {
     dragging: false,
     ignoreMouse: false,
     repaintTimers: [],
+    followTimer: null,
     // 旧坐标可能超出当前屏幕（换分辨率/DPI 后常见）：超界部分 Windows 不重绘、呈白底
     bounds: clampWindowIntoWorkArea(win),
   }
@@ -480,6 +523,7 @@ function createInstanceWindow(instanceId, config = {}, title = '') {
   })
 
   win.on('closed', () => {
+    stopFollowCursor(entry)
     for (const timer of entry.repaintTimers ?? []) clearTimeout(timer)
     entry.repaintTimers = []
     if (entry.pointerTimer) {
@@ -636,12 +680,54 @@ function handleCommand(command) {
     }
     return
   }
+  if (command.type === 'query-idle') {
+    let idleSeconds = null
+    try { idleSeconds = powerMonitor.getSystemIdleTime() } catch { /* 系统 API 不可用时由宿主回退计时 */ }
+    report({ type: 'idle-state', instanceId, idleSeconds, at: Date.now() })
+    return
+  }
+  if (command.type === 'presence') {
+    if (!entry?.win || entry.win.isDestroyed()) {
+      report({ type: 'error', instanceId, code: 'no-such-window', error: '窗口不存在' })
+      return
+    }
+    const position = String(command.position || 'home')
+    if (position === 'stop' || position === 'none') {
+      stopFollowCursor(entry)
+      report({ type: 'bounds', instanceId, bounds: entry.win.getBounds(), transient: true, presence: 'stop' })
+      return
+    }
+    if (position === 'follow-cursor') {
+      startFollowCursor(entry)
+      return
+    }
+    stopFollowCursor(entry)
+    const cur = entry.win.getBounds()
+    const area = screen.getDisplayMatching(cur).workArea ?? screen.getDisplayMatching(cur).bounds
+    let wanted
+    if (position === 'edge-left') {
+      wanted = { x: area.x, y: Math.round(area.y + area.height - cur.height - 24), width: cur.width, height: cur.height }
+    } else if (position === 'edge-right') {
+      wanted = { x: Math.round(area.x + area.width - cur.width), y: Math.round(area.y + area.height - cur.height - 24), width: cur.width, height: cur.height }
+    } else if (position === 'taskbar') {
+      wanted = { x: Math.round(area.x + 24), y: Math.round(area.y + area.height - cur.height), width: cur.width, height: cur.height }
+    } else {
+      wanted = { center: true, width: cur.width, height: cur.height }
+    }
+    const safe = computeSafeBounds(entry.win, wanted)
+    animateBounds(entry.win, safe, command.durationMs, (final) => {
+      entry.bounds = final
+      report({ type: 'bounds', instanceId, bounds: final, transient: true, presence: position })
+    })
+    return
+  }
   if (command.type === 'set-bounds') {
     if (!entry?.win || entry.win.isDestroyed()) {
       report({ type: 'error', instanceId, code: 'no-such-window', error: '窗口不存在' })
       return
     }
     const wanted = computeSafeBounds(entry.win, command.bounds ?? {})
+    stopFollowCursor(entry)
     if (command.animate === false) {
       entry.bounds = applySafeBounds(entry.win, command.bounds ?? {})
       report({ type: 'bounds', instanceId, bounds: entry.bounds })
@@ -851,6 +937,7 @@ app.whenReady().then(() => {
     const hit = entryByWebContents(event.sender)
     const win = hit?.entry?.win
     if (!hit || !win || win.isDestroyed() || !bounds) return { ok: false, error: 'window not ready' }
+    stopFollowCursor(hit.entry)
     const next = {
       x: Math.round(Number(bounds.x)),
       y: Math.round(Number(bounds.y)),
@@ -876,7 +963,25 @@ app.whenReady().then(() => {
     const hit = entryByWebContents(event.sender)
     if (hit) {
       log(`${hit.id} close requested by renderer`)
-      closeInstanceWindow(hit.id, true)
+      if (hit.entry?.closing) return true
+      if (hit.entry?.config?.lifeFarewellEnabled !== false && hit.entry?.win && !hit.entry.win.isDestroyed()) {
+        hit.entry.closing = true
+        const hour = new Date().getHours()
+        const text = hour >= 22 || hour < 5 ? '不早啦，我先去休息，晚安。' : '那我先休息啦，下次见。'
+        try {
+          hit.entry.win.webContents.send('live2d:command', {
+            __live2d: 1,
+            type: 'farewell',
+            instanceId: hit.id,
+            text,
+            durationMs: 1200,
+          })
+        } catch { /* 仍然按原计划关闭 */ }
+        const timer = setTimeout(() => closeInstanceWindow(hit.id, true), 1400)
+        if (typeof timer.unref === 'function') timer.unref()
+      } else {
+        closeInstanceWindow(hit.id, true)
+      }
       return true
     }
     return false
@@ -885,9 +990,16 @@ app.whenReady().then(() => {
   ipcMain.on('live2d:report', (event, payload) => {
     if (!payload || typeof payload !== 'object') return
     const hit = entryByWebContents(event.sender)
-    // 拖动状态只给主进程的兜底计时器用，不上报给宿主
+    if (hit?.entry && (payload.type === 'tap' || (payload.type === 'drag' && payload.active === true))) {
+      stopFollowCursor(hit.entry)
+    }
+    // 拖动状态：主进程兜底计时器用，同时只在变化时告诉宿主一次（双模型互动要跳过正在拖的对端）
     if (payload.type === 'drag' && hit?.entry) {
-      hit.entry.dragging = payload.active === true
+      const next = payload.active === true
+      if (hit.entry.dragging !== next) {
+        hit.entry.dragging = next
+        report({ type: 'drag', instanceId: hit.id ?? null, active: next })
+      }
       return
     }
     // 渲染层不该知道 instanceId —— 由主进程补上，保证不会串窗

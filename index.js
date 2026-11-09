@@ -25,7 +25,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, copyFileSync } from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
@@ -39,8 +39,8 @@ export const name = 'live2d'
 // 并用 /live2d/diag 同时记录「ctx.<name> 与 ctx.get(name) 各自拿到什么」，把结论坐实。
 export const inject = ['webServer', 'sessions', 'agents', 'sessionTitle', 'tools']
 
-export const VERSION = '0.1.0'
-export const STAGE = '5-wake'
+export const VERSION = '0.2.0'
+export const STAGE = 'P2-P3'
 
 // 插件自身目录：用来定位 electron/main.cjs（不依赖宿主包的 dsh-home-paths）
 export const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -68,6 +68,8 @@ export const DEFAULT_INSTANCE = {
   // 置顶开关（窗口里可切换；持久化，重开/重启后保持）
   pinned: true,
   replyStyle: 'bubble',
+  // 气泡外观：classic / cloud / signboard / note
+  bubbleSkin: 'classic',
   replyOpacity: 0.9,
   // 阶段 4：回答区字号与最大高度（%），超长回答在气泡内部滚动
   replyFontSize: 15,
@@ -90,6 +92,13 @@ export const DEFAULT_INSTANCE = {
   autoInteract: true,
   // 空闲小动作：没人理的时候偶尔眨眼/歪头（auto 模式的「有生气」部分）
   idlePresets: true,
+  // P2：观众在场判断；没有观众时只做低幅度动作。
+  audienceAwareEnabled: true,
+  // P2：本地陪伴记忆。代码默认开；存量 profile 迁移时默认关，避免和已有记忆插件冲突。
+  memoryEnabled: true,
+  memoryMaxEntries: 100,
+  // P3：双模型关系互动（互相看、点头、偶尔吃醋）。
+  dualRelationEnabled: true,
   // 预设动作：自定义动作 + 循环序列（实例级）
   customActions: [],
   presetSequences: [],
@@ -127,12 +136,31 @@ export const DEFAULT_INSTANCE = {
   // 0.13.0：主动唤醒（定时/按钮都能叫醒 AI，让它看屏幕后主动回话）
   //  - 必须显式开启，不随模式切换自动开
   //  - 定时器与按钮唤醒共用一套额度（滚动 60 分钟）
+  // 主动感知方式：off / timer / event。timer 与 event 互斥，按钮唤醒不受它限制。
+  wakeDriver: 'off',
   wakeEnabled: false,
   wakeIntervalMs: 30_000,
   // 唤醒时截图：不打开的话唤醒只能读到窗口标题（用户 m13615 实测后要求默认开）
   wakeCaptureEnabled: true,
   wakeMaxPerHour: 60,
   wakeTimeoutMs: 120_000,
+  // P1 陪伴行为：宿主持续维护的“生命感”状态。
+  // 非语言回应默认开启（不调用模型）；事件主动说话默认关闭，避免升级后突然打扰。
+  lifeEnabled: true,
+  lifeNonverbalEnabled: true,
+  lifeNonverbalCooldownMs: 12_000,
+  eventWakeEnabled: false,
+  eventWakeFocusMs: 2_700_000,
+  eventWakeAwayMs: 600_000,
+  eventWakeTitleIntervalMs: 30_000,
+  eventWakeCooldownMs: 180_000,
+  eventWakeMaxPerHour: 8,
+  lifeShareBudgetPerDay: 5,
+  lifeImportantBudgetPerDay: 3,
+  eventQuietEnabled: false,
+  eventQuietStart: '23:00',
+  eventQuietEnd: '08:00',
+  lifeFarewellEnabled: true,
   // 0.13.0：AI 自主移动/缩放窗口（仅 manual 模式生效）
   // 0.13.9：默认开——否则「AI 自动」和普通模式看不出区别（用户 m13380）
   aiMoveEnabled: true,
@@ -174,6 +202,7 @@ export const DEFAULT_CONFIG = {
   modelPassthrough: false,
   adjustMode: false,
   replyStyle: 'bubble',
+  bubbleSkin: 'classic',
   replyOpacity: 0.9,
   modelScalePct: 100,
   modelLayoutMode: 'fit',
@@ -183,6 +212,10 @@ export const DEFAULT_CONFIG = {
   motionStrength: 60,
   autoInteract: true,
   idlePresets: true,
+  audienceAwareEnabled: true,
+  memoryEnabled: true,
+  memoryMaxEntries: 100,
+  dualRelationEnabled: true,
   // 预设动作：自定义动作（AI 设计，跨模型通用：写逻辑参数名，模型缺参数就跳过该轨道）
   customActions: [],
   // 预设循环：{ id, label, steps:[动作id], intervalMs, loop }
@@ -207,6 +240,7 @@ const LIMITS = {
   bubbleHeightPx: { min: 80, max: 900, fallback: 200 },
   modelScalePct: { min: 50, max: 200, fallback: 100 },
   motionStrength: { min: 1, max: 100, fallback: 60 },
+  memoryMaxEntries: { min: 20, max: 500, fallback: 100 },
   chatTimeoutMs: { min: 10_000, max: 300_000, fallback: 90_000 },
   animCooldownMs: { min: 0, max: 10_000, fallback: 3000 },
   animTimeoutMs: { min: 1000, max: 5000, fallback: 2000 },
@@ -216,6 +250,14 @@ const LIMITS = {
   wakeIntervalMs: { min: 15_000, max: 600_000, fallback: 30_000 },
   wakeMaxPerHour: { min: 1, max: 360, fallback: 60 },
   wakeTimeoutMs: { min: 30_000, max: 600_000, fallback: 120_000 },
+  lifeNonverbalCooldownMs: { min: 3000, max: 300_000, fallback: 12_000 },
+  eventWakeFocusMs: { min: 60_000, max: 7_200_000, fallback: 2_700_000 },
+  eventWakeAwayMs: { min: 60_000, max: 7_200_000, fallback: 600_000 },
+  eventWakeTitleIntervalMs: { min: 10_000, max: 300_000, fallback: 30_000 },
+  eventWakeCooldownMs: { min: 30_000, max: 3_600_000, fallback: 180_000 },
+  eventWakeMaxPerHour: { min: 1, max: 120, fallback: 8 },
+  lifeShareBudgetPerDay: { min: 0, max: 50, fallback: 5 },
+  lifeImportantBudgetPerDay: { min: 0, max: 30, fallback: 3 },
   maxInstances: 2,
 }
 
@@ -260,6 +302,13 @@ function clampNullableInt(value, { min, max, fallback }, label, warnings) {
     return fallback
   }
   return number
+}
+
+function normalizeClock(value, fallback, label, warnings) {
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return value
+  warnings.push(`${label} 必须是 HH:mm（收到 ${JSON.stringify(value)}），已回落 ${fallback}`)
+  return fallback
 }
 
 // 拖动窗口时用「夹到边界」而不是「回落默认值」：
@@ -382,9 +431,11 @@ export function normalizeCustomActions(raw, warnings = []) {
       for (const pair of Array.isArray(track?.keys) ? track.keys.slice(0, KEY_LIMIT) : []) {
         if (!Array.isArray(pair) || pair.length < 2) continue
         const t = Number(pair[0])
-        const v = Number(pair[1])
-        if (!Number.isFinite(t) || !Number.isFinite(v)) continue
-        keys.push([Math.min(1, Math.max(0, t)), Math.min(40, Math.max(-40, v))])
+        // 'current' = 播放时取模型当前值（换装/开关类动作的起点，不能写死 0）
+        const raw = pair[1] === 'current' ? 'current' : Number(pair[1])
+        if (!Number.isFinite(t)) continue
+        if (raw !== 'current' && !Number.isFinite(raw)) continue
+        keys.push([Math.min(1, Math.max(0, t)), raw === 'current' ? 'current' : Math.min(40, Math.max(-40, raw))])
       }
       if (!keys.length) continue
       keys.sort((a, b) => a[0] - b[0])
@@ -394,7 +445,17 @@ export function normalizeCustomActions(raw, warnings = []) {
       warnings.push(`自定义动作「${id}」没有任何有效轨道，已跳过`)
       continue
     }
-    out.push({ id, label, durationMs, tracks })
+    out.push({
+      id,
+      label,
+      durationMs,
+      // hold：设完保持不回到原值（换装、开关类）；再点一次由渲染层取消
+      hold: item?.hold === true,
+      desc: typeof item?.desc === 'string' ? item.desc.slice(0, 40) : '',
+      group: typeof item?.group === 'string' ? item.group.slice(0, 16) : '',
+      auto: item?.auto === true,
+      tracks,
+    })
   }
   return out
 }
@@ -420,17 +481,20 @@ export function normalizePresetSequences(raw, warnings = []) {
       warnings.push(`预设循环「${id}」没有步骤，已跳过`)
       continue
     }
-    out.push({
+    const entry = {
       id,
       label: typeof item?.label === 'string' && item.label.trim() ? item.label.trim().slice(0, 24) : id,
       steps,
       intervalMs: Math.min(60_000, Math.max(300, Math.round(Number(item?.intervalMs) || 2500))),
       loop: item?.loop !== false,
-      // 0.13.9：一个循环可以同时绑定两个模型（空 = 用当前实例）
-      targets: (Array.isArray(item?.targets) ? item.targets : [])
-        .filter((target) => typeof target === 'string' && /^[\w-]{1,32}$/.test(target))
-        .slice(0, 2),
-    })
+    }
+    // 0.3.2：循环属于「模型档案」，不再绑定实例 id。
+    // 旧配置里的 targets 只留档（legacyTargets）供迁移报告核对，不参与运行。
+    const legacy = (Array.isArray(item?.targets) ? item.targets : [])
+      .filter((target) => typeof target === 'string' && /^[\w-]{1,32}$/.test(target))
+      .slice(0, 2)
+    if (legacy.length) entry.legacyTargets = legacy
+    out.push(entry)
   }
   return out
 }
@@ -438,6 +502,7 @@ export function normalizePresetSequences(raw, warnings = []) {
 function normalizeInstance(raw, index, warnings) {
   const source = raw && typeof raw === 'object' ? raw : {}
   const id = typeof source.id === 'string' && /^[\w-]{1,32}$/.test(source.id) ? source.id : `inst-${index + 1}`
+  const wakeDriver = normalizeWakeDriver(source, warnings)
   return {
     id,
     sessionId: normalizeBoundSession(source.sessionId ?? source.boundSessionId, warnings),
@@ -451,6 +516,7 @@ function normalizeInstance(raw, index, warnings) {
     modelPassthrough: boolOr(source.modelPassthrough, DEFAULT_INSTANCE.modelPassthrough, 'modelPassthrough', warnings),
     adjustMode: boolOr(source.adjustMode, DEFAULT_INSTANCE.adjustMode, 'adjustMode', warnings),
     replyStyle: normalizeReplyStyle(source.replyStyle, warnings),
+    bubbleSkin: normalizeBubbleSkin(source.bubbleSkin, warnings),
     replyOpacity: clampNumber(source.replyOpacity, LIMITS.replyOpacity, 'replyOpacity', warnings),
     replyFontSize: clampInt(source.replyFontSize, LIMITS.replyFontSize, 'replyFontSize', warnings),
     replyMaxHeightPct: clampInt(source.replyMaxHeightPct, LIMITS.replyMaxHeightPct, 'replyMaxHeightPct', warnings),
@@ -466,6 +532,10 @@ function normalizeInstance(raw, index, warnings) {
     motionStrength: clampInt(source.motionStrength, LIMITS.motionStrength, 'motionStrength', warnings),
     autoInteract: boolOr(source.autoInteract, DEFAULT_INSTANCE.autoInteract, 'autoInteract', warnings),
     idlePresets: boolOr(source.idlePresets, DEFAULT_INSTANCE.idlePresets, 'idlePresets', warnings),
+    audienceAwareEnabled: boolOr(source.audienceAwareEnabled, DEFAULT_INSTANCE.audienceAwareEnabled, 'audienceAwareEnabled', warnings),
+    memoryEnabled: boolOr(source.memoryEnabled, DEFAULT_INSTANCE.memoryEnabled, 'memoryEnabled', warnings),
+    memoryMaxEntries: clampInt(source.memoryMaxEntries, LIMITS.memoryMaxEntries, 'memoryMaxEntries', warnings),
+    dualRelationEnabled: boolOr(source.dualRelationEnabled, DEFAULT_INSTANCE.dualRelationEnabled, 'dualRelationEnabled', warnings),
     // 气泡参数是「每个实例各一套」：早先没放进实例字段，设置页保存后会被丢回全局默认（5 秒）
     bubbleDurationMs: clampInt(source.bubbleDurationMs, LIMITS.bubbleDurationMs, 'bubbleDurationMs', warnings),
     bubbleQueueLimit: clampInt(source.bubbleQueueLimit, LIMITS.bubbleQueueLimit, 'bubbleQueueLimit', warnings),
@@ -493,21 +563,38 @@ function normalizeInstance(raw, index, warnings) {
     mode: normalizeMode(source.mode, warnings),
     autoBubble: boolOr(source.autoBubble, DEFAULT_INSTANCE.autoBubble, 'autoBubble', warnings),
     // 0.13.0：主动唤醒
-    wakeEnabled: boolOr(source.wakeEnabled, DEFAULT_INSTANCE.wakeEnabled, 'wakeEnabled', warnings),
+    wakeDriver,
+    wakeEnabled: wakeDriver === 'timer',
     wakeIntervalMs: clampInt(source.wakeIntervalMs, LIMITS.wakeIntervalMs, 'wakeIntervalMs', warnings),
     wakeCaptureEnabled: boolOr(source.wakeCaptureEnabled, DEFAULT_INSTANCE.wakeCaptureEnabled, 'wakeCaptureEnabled', warnings),
     wakeMaxPerHour: clampInt(source.wakeMaxPerHour, LIMITS.wakeMaxPerHour, 'wakeMaxPerHour', warnings),
     wakeTimeoutMs: clampInt(source.wakeTimeoutMs, LIMITS.wakeTimeoutMs, 'wakeTimeoutMs', warnings),
+    lifeEnabled: boolOr(source.lifeEnabled, DEFAULT_INSTANCE.lifeEnabled, 'lifeEnabled', warnings),
+    lifeNonverbalEnabled: boolOr(source.lifeNonverbalEnabled, DEFAULT_INSTANCE.lifeNonverbalEnabled, 'lifeNonverbalEnabled', warnings),
+    lifeNonverbalCooldownMs: clampInt(source.lifeNonverbalCooldownMs, LIMITS.lifeNonverbalCooldownMs, 'lifeNonverbalCooldownMs', warnings),
+    eventWakeEnabled: wakeDriver === 'event',
+    eventWakeFocusMs: clampInt(source.eventWakeFocusMs, LIMITS.eventWakeFocusMs, 'eventWakeFocusMs', warnings),
+    eventWakeAwayMs: clampInt(source.eventWakeAwayMs, LIMITS.eventWakeAwayMs, 'eventWakeAwayMs', warnings),
+    eventWakeTitleIntervalMs: clampInt(source.eventWakeTitleIntervalMs, LIMITS.eventWakeTitleIntervalMs, 'eventWakeTitleIntervalMs', warnings),
+    eventWakeCooldownMs: clampInt(source.eventWakeCooldownMs, LIMITS.eventWakeCooldownMs, 'eventWakeCooldownMs', warnings),
+    eventWakeMaxPerHour: clampInt(source.eventWakeMaxPerHour, LIMITS.eventWakeMaxPerHour, 'eventWakeMaxPerHour', warnings),
+    lifeShareBudgetPerDay: clampInt(source.lifeShareBudgetPerDay, LIMITS.lifeShareBudgetPerDay, 'lifeShareBudgetPerDay', warnings),
+    lifeImportantBudgetPerDay: clampInt(source.lifeImportantBudgetPerDay, LIMITS.lifeImportantBudgetPerDay, 'lifeImportantBudgetPerDay', warnings),
+    eventQuietEnabled: boolOr(source.eventQuietEnabled, DEFAULT_INSTANCE.eventQuietEnabled, 'eventQuietEnabled', warnings),
+    eventQuietStart: normalizeClock(source.eventQuietStart, DEFAULT_INSTANCE.eventQuietStart, 'eventQuietStart', warnings),
+    eventQuietEnd: normalizeClock(source.eventQuietEnd, DEFAULT_INSTANCE.eventQuietEnd, 'eventQuietEnd', warnings),
+    lifeFarewellEnabled: boolOr(source.lifeFarewellEnabled, DEFAULT_INSTANCE.lifeFarewellEnabled, 'lifeFarewellEnabled', warnings),
     aiMoveEnabled: boolOr(source.aiMoveEnabled, DEFAULT_INSTANCE.aiMoveEnabled, 'aiMoveEnabled', warnings),
   }
 }
 
 const INSTANCE_KEYS = [
   'enabled', 'modelPath', 'modelRoots', 'windowWidth', 'windowHeight', 'windowX', 'windowY',
-  'rendererEnabled', 'clickThrough', 'modelPassthrough', 'adjustMode', 'pinned', 'replyStyle', 'replyOpacity', 'sessionId', 'boundSessionId',
+  'rendererEnabled', 'clickThrough', 'modelPassthrough', 'adjustMode', 'pinned', 'replyStyle', 'bubbleSkin', 'replyOpacity', 'sessionId', 'boundSessionId',
   'replyFontSize', 'replyMaxHeightPct', 'replyHeightRatio', 'bubbleFixedSize', 'bubbleHeightPx',
   'modelScalePct', 'modelLayoutMode',
   'idleFloat', 'lookFollow', 'dragInertia', 'motionStrength', 'autoInteract', 'idlePresets',
+  'audienceAwareEnabled', 'memoryEnabled', 'memoryMaxEntries', 'dualRelationEnabled',
   'customActions', 'presetSequences',
   'bubbleDurationMs', 'bubbleQueueLimit', 'bubbleMaxChars', 'autoOpenWindow',
   'screenReadEnabled',
@@ -515,7 +602,13 @@ const INSTANCE_KEYS = [
   'screenCaptureEnabled', 'screenCaptureAutoConfirm', 'screenCaptureIntervalMs',
   'ttsEnabled', 'ttsAutoSpeak', 'ttsUrl', 'ttsPrompt', 'ttsPromptText',
   'showLateReply', 'chatTimeoutMs', 'mode', 'autoBubble',
-  'wakeEnabled', 'wakeIntervalMs', 'wakeCaptureEnabled', 'wakeMaxPerHour', 'wakeTimeoutMs',
+  'wakeDriver', 'wakeEnabled', 'wakeIntervalMs', 'wakeCaptureEnabled', 'wakeMaxPerHour', 'wakeTimeoutMs',
+  'lifeEnabled', 'lifeNonverbalEnabled', 'lifeNonverbalCooldownMs',
+  'eventWakeEnabled', 'eventWakeFocusMs', 'eventWakeAwayMs', 'eventWakeTitleIntervalMs',
+  'eventWakeCooldownMs', 'eventWakeMaxPerHour',
+  'lifeShareBudgetPerDay', 'lifeImportantBudgetPerDay',
+  'eventQuietEnabled', 'eventQuietStart', 'eventQuietEnd',
+  'lifeFarewellEnabled',
   'aiMoveEnabled',
 ]
 
@@ -545,9 +638,17 @@ export function normalizeConfig(raw) {
     instance.id = id
   }
 
+  // 0.3.2：模型档案 + 路径绑定（动作/循环按模型共享，不按实例）
+  const modelProfiles = normalizeModelProfiles(source.modelProfiles, warnings)
+  const modelPathBindings = normalizeModelPathBindings(source.modelPathBindings, modelProfiles)
+
   const first = instances[0]
   return {
     config: {
+      // 0.3.2 起配置带 schema 版本，便于以后迁移判断
+      schemaVersion: 2,
+      modelProfiles,
+      modelPathBindings,
       enabled: source.enabled === undefined ? DEFAULT_CONFIG.enabled : source.enabled !== false,
       shellSelfTest: source.shellSelfTest === undefined ? DEFAULT_CONFIG.shellSelfTest : source.shellSelfTest !== false,
       selfTestTimeoutMs: clampInt(source.selfTestTimeoutMs, LIMITS.selfTestTimeoutMs, 'selfTestTimeoutMs', warnings),
@@ -578,7 +679,12 @@ export function normalizeConfig(raw) {
       modelPassthrough: first.modelPassthrough,
       adjustMode: first.adjustMode,
       replyStyle: first.replyStyle,
+      bubbleSkin: first.bubbleSkin,
       replyOpacity: first.replyOpacity,
+      audienceAwareEnabled: first.audienceAwareEnabled,
+      memoryEnabled: first.memoryEnabled,
+      memoryMaxEntries: first.memoryMaxEntries,
+      dualRelationEnabled: first.dualRelationEnabled,
       boundSessionId: first.sessionId,
     },
     warnings,
@@ -630,6 +736,776 @@ export function validateInstances(config) {
   return { ok: true }
 }
 
+// ---------------------------------------------------------------------------
+// 模型档案（0.3.2）：动作/循环跟着「模型」走，不跟着「实例」走
+//   modelProfiles[profileId]      = { id, label, pathKey, modelEntry, fingerprint, customActions, presetSequences, createdAt, updatedAt }
+//   modelPathBindings[pathKey]    = profileId
+// 路径只是「绑定键」，档案 ID 独立存在：换目录、重新绑定、进历史档案都不会改 ID。
+// ---------------------------------------------------------------------------
+
+export const PROFILE_ID_RE = /^mp_[a-z0-9]{4,16}$/
+export const PROFILE_LIMIT = 40
+
+/** 由规范化路径派生一个确定性档案 id（同路径永远同 id，迁移可重入）。 */
+export function profileIdForKey(pathKey) {
+  const key = String(pathKey ?? '')
+  return `mp_${createHash('sha1').update(key).digest('hex').slice(0, 10)}`
+}
+
+export function normalizeModelProfiles(raw, warnings = []) {
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  const out = {}
+  let count = 0
+  for (const [key, item] of Object.entries(source)) {
+    if (count >= PROFILE_LIMIT) {
+      warnings.push(`模型档案最多 ${PROFILE_LIMIT} 个，多余的已忽略`)
+      break
+    }
+    if (!item || typeof item !== 'object') continue
+    const id = typeof item.id === 'string' && PROFILE_ID_RE.test(item.id)
+      ? item.id
+      : (PROFILE_ID_RE.test(key) ? key : '')
+    if (!id) {
+      warnings.push('模型档案 id 不合法，已跳过')
+      continue
+    }
+    if (out[id]) {
+      warnings.push(`模型档案 id「${id}」重复，已跳过`)
+      continue
+    }
+    const pathKey = normalizeModelKey(item.pathKey)
+    const label = typeof item.label === 'string' && item.label.trim()
+      ? item.label.trim().slice(0, 32)
+      : (pathKey ? path.basename(pathKey) : '未命名模型')
+    out[id] = {
+      id,
+      label,
+      pathKey,
+      modelEntry: typeof item.modelEntry === 'string' ? item.modelEntry.slice(0, 120) : '',
+      fingerprint: typeof item.fingerprint === 'string' ? item.fingerprint.slice(0, 80) : '',
+      customActions: normalizeCustomActions(item.customActions, warnings),
+      presetSequences: normalizePresetSequences(item.presetSequences, warnings),
+      // 按模型能力自动挑的默认动作（0.4.0）：与用户自定义动作分开存，重挑时只覆盖这一份
+      autoActions: normalizeCustomActions(item.autoActions, warnings),
+      autoActionsHash: typeof item.autoActionsHash === 'string' ? item.autoActionsHash.slice(0, 40) : '',
+      // 0.5.0：模型目录扫描结果（表情/换装/动作文件）与生成的动作
+      capabilities: normalizeCapabilities(item.capabilities, warnings),
+      capabilityHash: typeof item.capabilityHash === 'string' ? item.capabilityHash.slice(0, 40) : '',
+      capabilityActions: normalizeCustomActions(item.capabilityActions, warnings),
+      createdAt: Number(item.createdAt) || Date.now(),
+      updatedAt: Number(item.updatedAt) || Date.now(),
+    }
+    count += 1
+  }
+  return out
+}
+
+/** 能力扫描结果的落盘形态（0.5.0）：只留能复用的字段，避免把整个 model3.json 塞进配置。 */
+export function normalizeCapabilities(raw, warnings = []) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const expressions = []
+  for (const item of Array.isArray(raw.expressions) ? raw.expressions.slice(0, 120) : []) {
+    const label = typeof item?.label === 'string' ? item.label.trim().slice(0, 32) : ''
+    const params = []
+    for (const p of Array.isArray(item?.params) ? item.params.slice(0, 16) : []) {
+      const param = typeof p?.param === 'string' ? p.param.trim().slice(0, 40) : ''
+      if (!param) continue
+      const value = Number(p?.value)
+      if (!Number.isFinite(value)) continue
+      params.push({
+        param,
+        value: Math.min(40, Math.max(-40, value)),
+        blend: ['Add', 'Multiply', 'Overwrite'].includes(p?.blend) ? p.blend : 'Add',
+      })
+    }
+    if (!label || !params.length) continue
+    expressions.push({
+      id: typeof item?.id === 'string' ? item.id.slice(0, 40) : '',
+      label,
+      file: typeof item?.file === 'string' ? item.file.slice(0, 120) : '',
+      group: typeof item?.group === 'string' ? item.group.slice(0, 12) : 'other',
+      params,
+      registered: item?.registered === true,
+    })
+  }
+  const motions = []
+  for (const item of Array.isArray(raw.motions) ? raw.motions.slice(0, 60) : []) {
+    const label = typeof item?.label === 'string' ? item.label.trim().slice(0, 32) : ''
+    if (!label) continue
+    motions.push({
+      label,
+      file: typeof item?.file === 'string' ? item.file.slice(0, 120) : '',
+      registered: item?.registered === true,
+    })
+  }
+  if (!expressions.length && !motions.length) {
+    warnings.push('能力扫描没有发现表情/动作文件')
+    return null
+  }
+  return {
+    scannedAt: Number(raw.scannedAt) || Date.now(),
+    root: typeof raw.root === 'string' ? raw.root.slice(0, 260) : '',
+    expressions,
+    motions,
+    warnings: Array.isArray(raw.warnings) ? raw.warnings.slice(0, 6).map((w) => String(w).slice(0, 120)) : [],
+  }
+}
+
+/** 绑定表只保留「指向存在的档案」的项；路径与档案 id 都归一化。 */
+export function normalizeModelPathBindings(raw, profiles) {
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  const out = {}
+  for (const [key, value] of Object.entries(source)) {
+    const pathKey = normalizeModelKey(key)
+    if (!pathKey || typeof value !== 'string' || !profiles || !profiles[value]) continue
+    out[pathKey] = value
+  }
+  return out
+}
+
+/** 找实例当前模型对应的档案（只看绑定表，不创建）。 */
+export function profileFor(state, inst) {
+  const key = normalizeModelKey(inst?.config?.modelPath ?? inst?.modelPath)
+  if (!key) return null
+  const id = state?.config?.modelPathBindings?.[key]
+  return id ? state.config.modelProfiles?.[id] ?? null : null
+}
+
+/** 找或建档案（只改内存；写盘由调用方负责）。返回 { ok, profile, created }。 */
+export function ensureProfileFor(state, inst) {
+  const key = normalizeModelKey(inst?.config?.modelPath ?? inst?.modelPath)
+  if (!key) return { ok: false, code: 'no-model-path' }
+  const existing = profileFor(state, inst)
+  if (existing) return { ok: true, profile: existing, created: false }
+  const id = profileIdForKey(key)
+  const profiles = { ...(state.config.modelProfiles ?? {}) }
+  if (profiles[id]) {
+    state.config.modelProfiles = profiles
+    state.config.modelPathBindings = { ...(state.config.modelPathBindings ?? {}), [key]: id }
+    return { ok: true, profile: profiles[id], created: false }
+  }
+  const now = Date.now()
+  const profile = {
+    id,
+    label: path.basename(key) || key,
+    pathKey: key,
+    modelEntry: '',
+    fingerprint: '',
+    customActions: [],
+    presetSequences: [],
+    autoActions: [],
+    autoActionsHash: '',
+    capabilities: null,
+    capabilityHash: '',
+    capabilityActions: [],
+    createdAt: now,
+    updatedAt: now,
+  }
+  profiles[id] = profile
+  state.config.modelProfiles = profiles
+  state.config.modelPathBindings = { ...(state.config.modelPathBindings ?? {}), [key]: id }
+  return { ok: true, profile, created: true }
+}
+
+/** 改档案（只归一化 + 替换内存，不写盘）。 */
+export function patchProfile(state, profileId, patch) {
+  const profiles = { ...(state.config.modelProfiles ?? {}) }
+  const current = profiles[profileId]
+  if (!current) return { ok: false, code: 'no-such-profile', status: 404 }
+  const merged = { ...current, ...(patch ?? {}) }
+  const warnings = []
+  const normalized = normalizeModelProfiles({ [profileId]: merged }, warnings)
+  const next = normalized[profileId]
+  if (!next) return { ok: false, code: 'bad-profile', status: 400, warnings }
+  next.updatedAt = Date.now()
+  profiles[profileId] = next
+  state.config.modelProfiles = profiles
+  return { ok: true, profile: next, warnings }
+}
+
+/** 把动作/循环写进「当前模型档案」并落盘（工具与 HTTP 共用）。 */
+export function savePresetsToProfile(state, inst, patch, log = null) {
+  const ensured = ensureProfileFor(state, inst)
+  if (!ensured.ok) {
+    return { ok: false, code: ensured.code, error: '当前实例没有模型路径，无法建立模型档案' }
+  }
+  const result = patchProfile(state, ensured.profile.id, patch)
+  if (!result.ok) {
+    return { ok: false, code: result.code || 'bad-profile', error: `保存模型档案失败：${result.code ?? '未知'}` }
+  }
+  const saved = writeConfigFile(state.config, state.configFile ?? CONFIG_FILE)
+  if (!saved.ok) {
+    return { ok: false, code: 'save-failed', error: `写配置失败：${saved.error}` }
+  }
+  try {
+    pushPresetsToWindow(state.root ?? state, inst)
+  } catch (error) {
+    logged(log, `live2d: 推送预设失败：${errorText(error)}`)
+  }
+  return { ok: true, profile: result.profile, warnings: result.warnings ?? [] }
+}
+
+/**
+ * 按模型真实参数挑 10 个「能完整做出来」的动作，写进该模型的档案（0.4.0）。
+ * 触发时机：渲染层上报 model-params 后；参数集没变就跳过，换模型/资源变了才重挑。
+ * 不动 customActions——用户/AI 自定义的动作永远优先保留。
+ */
+export function ensureAutoActions(state, inst, log = null, options = {}) {
+  const root = state?.root ?? state
+  const target = inst ?? state
+  if (!root?.config || !target) return { ok: false, code: 'no-state' }
+  // 参数集可能挂在：实例对象（渲染层上报时写的 rendererParams）/ 窗口状态 / 根状态
+  const params = target?.rendererParams?.params
+    ?? target?.renderer?.params?.params
+    ?? root.renderer?.params?.params
+  if (!Array.isArray(params) || params.length < 5) return { ok: false, code: 'no-params' }
+  const ensured = ensureProfileFor(root, target)
+  if (!ensured.ok) return { ok: false, code: ensured.code }
+  const profile = ensured.profile
+  const hash = libraryParamsHash(params)
+  // 0.5.0：顺带扫模型目录，把 Exp3/Animation 里的表情、换装、动作文件找出来
+  const modelPath = target?.config?.modelPath ?? target?.modelPath
+  let scan = null
+  try {
+    scan = options.capabilities ?? (modelPath ? scanModelCapability(modelPath) : null)
+  } catch (error) {
+    logged(log, `live2d: 能力扫描失败（${modelPath}）：${errorText(error)}`)
+  }
+  const capHash = scan
+    ? createHash('sha1').update(JSON.stringify({ e: scan.expressions, m: scan.motions })).digest('hex').slice(0, 12)
+    : ''
+  const needAuto = options.force === true || profile.autoActionsHash !== hash
+  // 扫描失败（目录不存在/没有 model3.json）不算「能力变化」，避免每帧重扫重写
+  const needCap = Boolean(scan?.ok) && (options.force === true || profile.capabilityHash !== capHash)
+  if (!needAuto && !needCap) {
+    return {
+      ok: true, changed: false, profileId: profile.id, hash,
+      count: profile.autoActions?.length ?? 0,
+      capabilityCount: profile.capabilityActions?.length ?? 0,
+      capabilities: profile.capabilities ?? null,
+    }
+  }
+  const patch = {}
+  if (needAuto) {
+    const picked = pickDefaultActions(params, 10)
+    patch.autoActions = picked
+    patch.autoActionsHash = hash
+  }
+  if (needCap) {
+    patch.capabilities = scan
+    patch.capabilityHash = capHash
+    patch.capabilityActions = pickCapabilityActions(scan, params)
+  }
+  const result = patchProfile(root, profile.id, patch)
+  if (!result.ok) return { ok: false, code: result.code || 'bad-profile' }
+  const saved = writeConfigFile(root.config, root.configFile ?? CONFIG_FILE)
+  if (!saved.ok) return { ok: false, code: 'save-failed', error: saved.error }
+  try {
+    pushPresetsToWindow(root, target)
+  } catch (error) {
+    logged(log, `live2d: 推送默认动作失败：${errorText(error)}`)
+  }
+  const profileNow = result.profile
+  // 接入/换模型后主动告诉用户「这只模型能做什么」（每只模型只提示一次，按档案 + 扫描指纹）
+  try {
+    const caps = profileNow.capabilities
+    if (caps) {
+      const notifyKey = `${profileNow.id}:${profileNow.capabilityHash}`
+      if (root.renderer?.capabilityNotified !== notifyKey) {
+        root.renderer = { ...(root.renderer ?? {}), capabilityNotified: notifyKey }
+        const by = (group) => caps.expressions.filter((item) => item.group === group).length
+        const bits = []
+        if (by('face')) bits.push(`${by('face')} 个表情`)
+        if (by('clothes')) bits.push(`${by('clothes')} 套换装`)
+        if (by('gesture')) bits.push(`${by('gesture')} 个手势`)
+        const playable = (profileNow.capabilityActions ?? []).length
+        const lines = [`这只模型我摸过了：${bits.join('、') || '没找到表情/换装'}。`]
+        if (playable) lines.push(`其中 ${playable} 个能直接用，已经放进右键菜单——点一次开，再点一次关。`)
+        if (caps.motions.length) lines.push(`另外有 ${caps.motions.length} 个动画文件（${caps.motions.slice(0, 3).map((item) => item.label).join('、')}…），模型没登记，暂时播不了。`)
+        instanceView(root, target).windows.send({
+          type: 'bubble',
+          text: lines.join(' '),
+          format: 'markdown',
+          seq: Date.now() % 100000,
+          durationMs: 7000,
+        })
+      }
+    }
+  } catch { /* 提示失败不影响主流程 */ }
+  logged(log, `live2d: 模型能力生成 —— 默认动作 ${profileNow.autoActions?.length ?? 0} 个 / 表情换装 ${profileNow.capabilityActions?.length ?? 0} 个`)
+  return {
+    ok: true,
+    changed: true,
+    profileId: profile.id,
+    hash,
+    count: profileNow.autoActions?.length ?? 0,
+    capabilityCount: profileNow.capabilityActions?.length ?? 0,
+    capabilities: profileNow.capabilities ?? null,
+  }
+}
+
+export function createLifeRuntime(seed = {}, now = Date.now()) {
+  const numberIn = (value, min, max, fallback) => {
+    const n = Number(value)
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback
+  }
+  return {
+    attention: typeof seed.attention === 'string' ? seed.attention : 'unknown',
+    previousAttention: null,
+    audience: typeof seed.audience === 'string' ? seed.audience : 'unknown',
+    lastUserActivityAt: numberIn(seed.lastUserActivityAt, 0, now, now),
+    lastModelInteractionAt: numberIn(seed.lastModelInteractionAt, 0, now, now),
+    lastAgentStartAt: numberIn(seed.lastAgentStartAt, 0, now, 0),
+    lastAgentFinishAt: numberIn(seed.lastAgentFinishAt, 0, now, 0),
+    lastForegroundTitle: null,
+    lastForegroundProcess: null,
+    foregroundSince: numberIn(seed.foregroundSince, 0, now, now),
+    lastForegroundReadAt: now,
+    systemIdleSec: null,
+    systemIdleAt: 0,
+    energy: numberIn(seed.energy, 0, 1, 0.72),
+    mood: numberIn(seed.mood, -1, 1, 0.08),
+    boredom: numberIn(seed.boredom, 0, 1, 0.1),
+    closeness: numberIn(seed.closeness, 0, 1, 0),
+    lastTickAt: now,
+    lastNonverbalAt: numberIn(seed.lastNonverbalAt, 0, now, 0),
+    lastEventAt: numberIn(seed.lastEventAt, 0, now, 0),
+    lastEvent: typeof seed.lastEvent === 'string' ? seed.lastEvent : 'boot',
+    lastVerbalAt: numberIn(seed.lastVerbalAt, 0, now, 0),
+    proactiveSinceUser: numberIn(seed.proactiveSinceUser, 0, 100, 0),
+    dailyKey: typeof seed.dailyKey === 'string' ? seed.dailyKey : '',
+    dailyShare: numberIn(seed.dailyShare, 0, 1000, 0),
+    dailyImportant: numberIn(seed.dailyImportant, 0, 1000, 0),
+    willingness: typeof seed.willingness === 'string' ? seed.willingness : 'social',
+    peerAffinity: numberIn(seed.peerAffinity, 0, 1, 0.2),
+    lastPeerInteractionAt: numberIn(seed.lastPeerInteractionAt, 0, now, 0),
+    verbalTimes: Array.isArray(seed.verbalTimes)
+      ? seed.verbalTimes.map(Number).filter((t) => Number.isFinite(t) && t > now - 60 * 60 * 1000)
+      : [],
+    focusFiredFor: null,
+    eventCounts: seed.eventCounts && typeof seed.eventCounts === 'object' ? { ...seed.eventCounts } : {},
+    lastDecision: null,
+  }
+}
+
+function clockMinutes(value) {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(value ?? ''))
+  return match ? Number(match[1]) * 60 + Number(match[2]) : null
+}
+
+export function quietHoursActive(config, now = Date.now()) {
+  if (config?.eventQuietEnabled !== true) return false
+  const start = clockMinutes(config.eventQuietStart)
+  const end = clockMinutes(config.eventQuietEnd)
+  if (start === null || end === null || start === end) return false
+  const date = new Date(now)
+  const minute = date.getHours() * 60 + date.getMinutes()
+  return start < end
+    ? minute >= start && minute < end
+    : minute >= start || minute < end
+}
+
+export function lifeDayKey(now = Date.now()) {
+  const date = new Date(now)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+export function lifeDailyBudget(inst, kind = 'share', now = Date.now()) {
+  const life = inst?.life ?? {}
+  const key = lifeDayKey(now)
+  const used = life.dailyKey === key ? Number(kind === 'important' ? life.dailyImportant : life.dailyShare) || 0 : 0
+  const max = Math.max(0, Number(kind === 'important' ? inst?.config?.lifeImportantBudgetPerDay : inst?.config?.lifeShareBudgetPerDay) || 0)
+  return { ok: used < max, used, max, remaining: Math.max(0, max - used), dayKey: key }
+}
+
+export function lifeWillingness(inst) {
+  const life = inst?.life ?? {}
+  const energy = Number(life.energy) || 0
+  const mood = Number(life.mood) || 0
+  const boredom = Number(life.boredom) || 0
+  const reserve = energy * 0.55 + ((mood + 1) / 2) * 0.25 + (1 - boredom) * 0.2
+  if (reserve < 0.3) return { state: 'withdrawn', reserve, nonverbal: false, speak: false, move: false }
+  if (reserve < 0.46 || Number(life.proactiveSinceUser) >= 2) {
+    return { state: 'tired', reserve, nonverbal: true, speak: false, move: false }
+  }
+  if (Number(life.proactiveSinceUser) >= 1) {
+    return { state: 'reserved', reserve, nonverbal: true, speak: true, move: false }
+  }
+  return { state: 'social', reserve, nonverbal: true, speak: true, move: true }
+}
+
+export function deriveLifeAttention(runtime, config, now = Date.now()) {
+  const idleSec = Number(runtime?.systemIdleSec)
+  const idleFresh = now - Number(runtime?.systemIdleAt ?? 0) < 20_000
+  if (idleFresh && Number.isFinite(idleSec)) {
+    if (idleSec * 1000 >= Math.max(60_000, Number(config?.eventWakeAwayMs) || 600_000)) return 'away'
+    if (idleSec <= 90) {
+      const focusedMs = now - Number(runtime?.foregroundSince ?? now)
+      if (runtime?.lastForegroundTitle && focusedMs >= Math.max(60_000, Number(config?.eventWakeFocusMs) || 2_700_000)) return 'focused'
+      return 'active'
+    }
+  }
+  const sinceUser = now - Number(runtime?.lastUserActivityAt ?? now)
+  if (sinceUser >= Math.max(60_000, Number(config?.eventWakeAwayMs) || 600_000)) return 'away'
+  if (sinceUser <= 90_000) {
+    const focusedMs = now - Number(runtime?.foregroundSince ?? now)
+    if (runtime?.lastForegroundTitle && focusedMs >= Math.max(60_000, Number(config?.eventWakeFocusMs) || 2_700_000)) return 'focused'
+    return 'active'
+  }
+  return 'idle'
+}
+
+export function deriveAudience(runtime, config, attention, now = Date.now()) {
+  if (config?.audienceAwareEnabled === false) return 'present'
+  if (attention === 'away') return 'absent'
+  const idleSec = Number(runtime?.systemIdleSec)
+  const idleFresh = now - Number(runtime?.systemIdleAt ?? 0) < 20_000
+  if (idleFresh && Number.isFinite(idleSec) && idleSec * 1000 >= Math.max(60_000, Number(config?.eventWakeAwayMs) || 600_000)) {
+    return 'absent'
+  }
+  if (attention === 'active' || attention === 'focused') return 'attentive'
+  return 'ambient'
+}
+
+export function lifeSpeakQuota(inst, now = Date.now()) {
+  const max = Math.max(1, Number(inst?.config?.eventWakeMaxPerHour) || 8)
+  const times = (inst?.life?.verbalTimes ?? [])
+    .map(Number)
+    .filter((t) => Number.isFinite(t) && t > now - 60 * 60 * 1000)
+    .sort((a, b) => a - b)
+  return {
+    ok: times.length < max,
+    used: times.length,
+    max,
+    remaining: Math.max(0, max - times.length),
+    nextAt: times.length < max ? null : new Date(times[0] + 60 * 60 * 1000).toISOString(),
+  }
+}
+
+export function lifeStateFile(state) {
+  return path.join(path.dirname(state?.configFile || CONFIG_FILE), 'life-state.json')
+}
+
+function persistedLife(runtime) {
+  return {
+    attention: runtime.attention,
+    audience: runtime.audience,
+    lastUserActivityAt: runtime.lastUserActivityAt,
+    lastModelInteractionAt: runtime.lastModelInteractionAt,
+    lastAgentStartAt: runtime.lastAgentStartAt,
+    lastAgentFinishAt: runtime.lastAgentFinishAt,
+    foregroundSince: runtime.foregroundSince,
+    energy: runtime.energy,
+    mood: runtime.mood,
+    boredom: runtime.boredom,
+    closeness: runtime.closeness,
+    lastNonverbalAt: runtime.lastNonverbalAt,
+    lastEventAt: runtime.lastEventAt,
+    lastEvent: runtime.lastEvent,
+    lastVerbalAt: runtime.lastVerbalAt,
+    proactiveSinceUser: runtime.proactiveSinceUser,
+    dailyKey: runtime.dailyKey,
+    dailyShare: runtime.dailyShare,
+    dailyImportant: runtime.dailyImportant,
+    willingness: runtime.willingness,
+    peerAffinity: runtime.peerAffinity,
+    lastPeerInteractionAt: runtime.lastPeerInteractionAt,
+    verbalTimes: runtime.verbalTimes,
+    eventCounts: runtime.eventCounts,
+  }
+}
+
+export function restoreLifeState(state, file = lifeStateFile(state)) {
+  let doc = null
+  try { doc = JSON.parse(readFileSync(file, 'utf8')) } catch { return { ok: false, restored: 0 } }
+  const rows = doc?.instances && typeof doc.instances === 'object' ? doc.instances : {}
+  let restored = 0
+  for (const inst of state.instances ?? []) {
+    if (!rows[inst.id]) continue
+    inst.life = createLifeRuntime(rows[inst.id])
+    restored += 1
+  }
+  return { ok: true, restored }
+}
+
+export function saveLifeState(state, file = lifeStateFile(state)) {
+  try {
+    mkdirSync(path.dirname(file), { recursive: true })
+    const instances = {}
+    for (const inst of state.instances ?? []) {
+      if (inst.life) instances[inst.id] = persistedLife(inst.life)
+    }
+    const temp = `${file}.tmp-${process.pid}-${Date.now()}`
+    writeFileSync(temp, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), instances }, null, 2), 'utf8')
+    renameSync(temp, file)
+    return { ok: true, file }
+  } catch (error) {
+    return { ok: false, file, error: errorText(error) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// P2：陪伴记忆（本地 JSON，与主会话分离）
+// ---------------------------------------------------------------------------
+
+export const MEMORY_KINDS = ['preference', 'fact', 'event', 'promise', 'relationship']
+
+export function memoryStateFile(state) {
+  const configFile = state?.configFile || CONFIG_FILE
+  const dir = path.dirname(configFile)
+  const base = path.basename(configFile, '.json')
+  return path.join(dir, base === 'config' ? 'memory.json' : `${base}.memory.json`)
+}
+
+function emptyMemoryStore() {
+  return { version: 1, sessions: {} }
+}
+
+function cleanMemoryText(value, max = 500) {
+  return String(value ?? '').replace(/\u0000/g, '').trim().slice(0, max)
+}
+
+function cleanMemoryTags(value) {
+  const raw = Array.isArray(value) ? value : String(value ?? '').split(/[,，\s]+/)
+  return [...new Set(raw.map((item) => cleanMemoryText(item, 24)).filter(Boolean))].slice(0, 8)
+}
+
+function normalizeMemoryEntry(raw, sessionId, now = Date.now()) {
+  const text = cleanMemoryText(raw?.text)
+  if (!text) return null
+  const kind = MEMORY_KINDS.includes(raw?.kind) ? raw.kind : 'fact'
+  return {
+    id: typeof raw?.id === 'string' && /^[\w-]{1,64}$/.test(raw.id) ? raw.id : `mem-${randomUUID()}`,
+    sessionId,
+    kind,
+    text,
+    tags: cleanMemoryTags(raw?.tags),
+    importance: Math.min(5, Math.max(1, Math.round(Number(raw?.importance) || 3))),
+    createdAt: Number(raw?.createdAt) > 0 ? Number(raw.createdAt) : now,
+    updatedAt: Number(raw?.updatedAt) > 0 ? Number(raw.updatedAt) : now,
+    dormant: raw?.dormant === true,
+    dormantAt: Number(raw?.dormantAt) > 0 ? Number(raw.dormantAt) : 0,
+    recalledAt: Number(raw?.recalledAt) > 0 ? Number(raw.recalledAt) : 0,
+    recallCount: Math.max(0, Math.round(Number(raw?.recallCount) || 0)),
+  }
+}
+
+export function loadMemoryStore(state, file = memoryStateFile(state)) {
+  let doc
+  try {
+    doc = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    return emptyMemoryStore()
+  }
+  const source = doc?.sessions && typeof doc.sessions === 'object' ? doc.sessions : {}
+  const sessions = {}
+  for (const [sessionId, rows] of Object.entries(source)) {
+    if (!Array.isArray(rows)) continue
+    sessions[sessionId] = rows
+      .map((row) => normalizeMemoryEntry(row, sessionId))
+      .filter(Boolean)
+  }
+  return { version: 1, sessions }
+}
+
+export function saveMemoryStore(state, store = state?.memory, file = memoryStateFile(state)) {
+  try {
+    mkdirSync(path.dirname(file), { recursive: true })
+    const temp = `${file}.tmp-${process.pid}-${Date.now()}`
+    writeFileSync(temp, JSON.stringify(store ?? emptyMemoryStore(), null, 2), 'utf8')
+    renameSync(temp, file)
+    return { ok: true, file }
+  } catch (error) {
+    return { ok: false, file, error: errorText(error) }
+  }
+}
+
+function ensureMemoryStore(state) {
+  if (!state.memory || typeof state.memory !== 'object') state.memory = loadMemoryStore(state)
+  if (!state.memory.sessions || typeof state.memory.sessions !== 'object') state.memory.sessions = {}
+  return state.memory
+}
+
+export function listMemories(state, sessionId) {
+  if (!sessionId) return []
+  const rows = ensureMemoryStore(state).sessions[sessionId]
+  return Array.isArray(rows) ? rows.map((row) => ({ ...row, tags: [...(row.tags ?? [])] })) : []
+}
+
+function memoryScore(entry, query) {
+  const q = cleanMemoryText(query, 120).toLowerCase()
+  if (!q) return Number(entry.importance) * 10 + Number(entry.updatedAt) / 1e12
+  const haystack = `${entry.text} ${entry.kind} ${(entry.tags ?? []).join(' ')}`.toLowerCase()
+  let score = haystack.includes(q) ? 50 : 0
+  for (const term of q.split(/\s+/).filter(Boolean)) {
+    if (haystack.includes(term)) score += 12
+  }
+  for (const tag of entry.tags ?? []) {
+    if (tag && q.includes(String(tag).toLowerCase())) score += 18
+  }
+  // 中文用户常把记忆夹在长句里（“今天又喝桂花茶了”）。
+  // 用二元片段找稳定共同词，避免必须整句完全包含。
+  const qGrams = new Set()
+  for (let i = 0; i < q.length - 1; i += 1) qGrams.add(q.slice(i, i + 2))
+  const eText = String(entry.text).toLowerCase()
+  let commonGrams = 0
+  for (let i = 0; i < eText.length - 1; i += 1) {
+    if (qGrams.has(eText.slice(i, i + 2))) commonGrams += 1
+  }
+  score += Math.min(30, commonGrams * 7)
+  return score + Number(entry.importance) * 2
+}
+
+export function searchMemories(state, sessionId, query = '', limit = 6, options = {}) {
+  const q = cleanMemoryText(query, 120)
+  const scored = listMemories(state, sessionId)
+    .map((entry) => ({ entry, score: memoryScore(entry, query) }))
+    .filter((item) => !q || item.score > Number(item.entry.importance) * 2)
+    .sort((a, b) => b.score - a.score || b.entry.updatedAt - a.entry.updatedAt)
+  let changed = false
+  const now = Date.now()
+  if (q && options.recallDormant !== false) {
+    for (const item of scored) {
+      if (item.entry.dormant && item.score >= 12) {
+        item.entry.dormant = false
+        item.entry.dormantAt = 0
+        item.entry.recalledAt = now
+        item.entry.recallCount = Number(item.entry.recallCount || 0) + 1
+        changed = true
+      }
+    }
+  }
+  if (changed) {
+    const rows = ensureMemoryStore(state).sessions[sessionId]
+    if (Array.isArray(rows)) {
+      const updates = new Map(scored.map((item) => [item.entry.id, item.entry]))
+      state.memory.sessions[sessionId] = rows.map((row) => updates.get(row.id) ?? row)
+      saveMemoryStore(state)
+    }
+  }
+  return scored
+    .filter((item) => !item.entry.dormant)
+    .slice(0, Math.max(1, Math.min(20, Number(limit) || 6)))
+    .map((item) => item.entry)
+}
+
+function trimMemoryEntries(state, inst, sessionId) {
+  const store = ensureMemoryStore(state)
+  const max = Math.max(20, Math.min(500, Number(inst?.config?.memoryMaxEntries) || 100))
+  const rows = store.sessions[sessionId] ?? []
+  store.sessions[sessionId] = rows
+    .sort((a, b) => Number(b.importance) - Number(a.importance) || Number(b.updatedAt) - Number(a.updatedAt))
+    .slice(0, max)
+}
+
+export function memoryMutation(state, inst, sessionId, op, payload = {}, now = Date.now()) {
+  if (!inst) return { ok: false, code: 'no-instance', error: '没有这个实例' }
+  if (!sessionId) return { ok: false, code: 'memory-no-session', error: '这个模型还没有绑定会话，记忆无法归属' }
+  if (inst.config?.memoryEnabled !== true) {
+    return { ok: false, code: 'memory-disabled', error: '这个实例的陪伴记忆未启用' }
+  }
+  const store = ensureMemoryStore(state)
+  const rows = store.sessions[sessionId] ?? (store.sessions[sessionId] = [])
+  if (op === 'remember' || op === 'add') {
+    const entry = normalizeMemoryEntry(payload, sessionId, now)
+    if (!entry) return { ok: false, code: 'empty-memory', error: '记忆内容不能为空' }
+    const duplicate = rows.find((item) => item.text === entry.text && item.kind === entry.kind)
+    if (duplicate) {
+      duplicate.tags = [...new Set([...(duplicate.tags ?? []), ...entry.tags])].slice(0, 8)
+      duplicate.importance = Math.max(Number(duplicate.importance) || 1, entry.importance)
+      duplicate.updatedAt = now
+      if (duplicate.dormant) {
+        duplicate.dormant = false
+        duplicate.dormantAt = 0
+        duplicate.recalledAt = now
+        duplicate.recallCount = Number(duplicate.recallCount || 0) + 1
+      }
+      trimMemoryEntries(state, inst, sessionId)
+      return { ok: true, entry: { ...duplicate, tags: [...duplicate.tags] }, saved: saveMemoryStore(state) }
+    }
+    rows.unshift(entry)
+    trimMemoryEntries(state, inst, sessionId)
+    return { ok: true, entry, saved: saveMemoryStore(state) }
+  }
+  if (op === 'update') {
+    const id = cleanMemoryText(payload?.id, 64)
+    const index = rows.findIndex((item) => item.id === id)
+    if (index < 0) return { ok: false, code: 'no-such-memory', error: `没有记忆 ${id || '(空)'}` }
+    const current = rows[index]
+    const next = normalizeMemoryEntry({ ...current, ...payload, id: current.id, createdAt: current.createdAt, updatedAt: now }, sessionId, now)
+    if (!next) return { ok: false, code: 'empty-memory', error: '记忆内容不能为空' }
+    rows[index] = next
+    trimMemoryEntries(state, inst, sessionId)
+    return { ok: true, entry: next, saved: saveMemoryStore(state) }
+  }
+  if (op === 'forget') {
+    const id = cleanMemoryText(payload?.id, 64)
+    const entry = rows.find((item) => item.id === id)
+    if (!entry) return { ok: false, code: 'no-such-memory', error: `没有记忆 ${id || '(空)'}` }
+    entry.dormant = true
+    entry.dormantAt = now
+    entry.updatedAt = now
+    return { ok: true, entry: { ...entry, tags: [...(entry.tags ?? [])] }, dormant: true, saved: saveMemoryStore(state) }
+  }
+  if (op === 'recall') {
+    const id = cleanMemoryText(payload?.id, 64)
+    const entry = rows.find((item) => item.id === id)
+    if (!entry) return { ok: false, code: 'no-such-memory', error: `没有记忆 ${id || '(空)'}` }
+    entry.dormant = false
+    entry.dormantAt = 0
+    entry.recalledAt = now
+    entry.recallCount = Number(entry.recallCount || 0) + 1
+    entry.updatedAt = now
+    return { ok: true, entry: { ...entry, tags: [...(entry.tags ?? [])] }, dormant: false, saved: saveMemoryStore(state) }
+  }
+  if (op === 'forget-old') {
+    const days = Math.max(1, Math.min(3650, Math.round(Number(payload?.olderThanDays) || 90)))
+    const cutoff = now - days * 24 * 60 * 60 * 1000
+    let dormantCount = 0
+    for (const row of rows) {
+      if (!row.dormant && Number(row.updatedAt) < cutoff) {
+        row.dormant = true
+        row.dormantAt = now
+        dormantCount += 1
+      }
+    }
+    return { ok: true, dormantCount, olderThanDays: days, saved: saveMemoryStore(state) }
+  }
+  return { ok: false, code: 'bad-memory-op', error: `不支持的记忆操作：${op}` }
+}
+
+export function memoryPromptLines(state, inst, query = '', limit = 4) {
+  if (inst?.config?.memoryEnabled !== true) return []
+  const sessionId = String(inst.config?.sessionId ?? '')
+  if (!sessionId) return []
+  const rows = searchMemories(state, sessionId, query, limit)
+  if (!rows.length) return []
+  return [
+    '陪伴记忆（只作为背景，不要逐字复述，也不要声称记得没有列出的内容）：',
+    ...rows.map((entry) => `- [${entry.kind}] ${entry.text}`),
+  ]
+}
+
+function updateLifeNeeds(runtime, config, attention, now, interacted = false) {
+  const dtHours = Math.min(1, Math.max(0, (now - Number(runtime.lastTickAt ?? now)) / 3_600_000))
+  if (attention === 'active' || attention === 'focused') {
+    runtime.energy = Math.max(0, runtime.energy - dtHours * 0.08)
+    runtime.boredom = Math.min(1, runtime.boredom + dtHours * 0.04)
+  } else {
+    runtime.energy = Math.min(1, runtime.energy + dtHours * 0.14)
+    runtime.boredom = Math.min(1, runtime.boredom + dtHours * 0.09)
+  }
+  if (interacted) {
+    runtime.energy = Math.min(1, runtime.energy + 0.025)
+    runtime.mood = Math.min(1, runtime.mood + 0.08)
+    runtime.boredom = Math.max(0, runtime.boredom - 0.22)
+    runtime.closeness = Math.min(1, runtime.closeness + 0.01)
+  } else {
+    runtime.mood += (0 - runtime.mood) * Math.min(1, dtHours * 1.5)
+  }
+  runtime.lastTickAt = now
+}
+
 function createInstanceState(item, root) {
   return {
     id: item.id,
@@ -665,6 +1541,7 @@ function createInstanceState(item, root) {
       lastResult: null,
       shots: [],
     },
+    life: createLifeRuntime(),
     windowBounds: null,
     recentSessionId: null,
     resolvedBy: null,
@@ -734,7 +1611,7 @@ export function modeAllows(inst, capability) {
   return canControl(inst, capability, { source: 'tool' })
 }
 
-export const CONTROL_SOURCES = ['ui', 'wake-button', 'wake-timer', 'window-chat', 'external-chat', 'preset-tap', 'tool']
+export const CONTROL_SOURCES = ['ui', 'wake-button', 'wake-timer', 'wake-event', 'window-chat', 'external-chat', 'preset-tap', 'tool']
 
 const normalMode = (inst) => {
   const mode = inst?.config?.mode
@@ -828,7 +1705,7 @@ export function instanceView(state, inst) {
   }
   // 这几个字段会被整体赋值（state.chat = {...} / state.model = probe(...)），
   // 视图上直接赋值会丢，所以全部写回实例对象。
-  for (const key of ['model', 'renderer', 'bubble', 'chat', 'anim', 'window', 'windowBounds', 'recentSessionId', 'resolvedBy', 'screen', 'wake']) {
+  for (const key of ['model', 'renderer', 'bubble', 'chat', 'anim', 'window', 'windowBounds', 'recentSessionId', 'resolvedBy', 'screen', 'wake', 'life']) {
     Object.defineProperty(view, key, {
       get: () => inst[key],
       set: (value) => { inst[key] = value },
@@ -846,8 +1723,26 @@ export function instanceView(state, inst) {
     })
   }
   // config / instances 动态合并：patch 之后旧视图也要看到新值
+  // 0.3.2：customActions / presetSequences 来自「模型档案」（按 modelPath 绑定），不再来自实例
   Object.defineProperty(view, 'config', {
-    get: () => ({ ...root.config, ...inst.config }),
+    get: () => {
+      const profile = profileFor(root, inst)
+      return {
+        ...root.config,
+        ...inst.config,
+        customActions: profile?.customActions ?? [],
+        presetSequences: profile?.presetSequences ?? [],
+        autoActions: profile?.autoActions ?? [],
+        capabilityActions: profile?.capabilityActions ?? [],
+        capabilities: profile?.capabilities ?? null,
+      }
+    },
+    enumerable: true,
+    configurable: true,
+  })
+  // 当前模型档案（没绑定就是 null）
+  Object.defineProperty(view, 'profile', {
+    get: () => profileFor(root, inst),
     enumerable: true,
     configurable: true,
   })
@@ -865,9 +1760,18 @@ export function patchInstance(state, instanceId, patch) {
   if (!(before.instances ?? []).some((item) => item.id === instanceId)) {
     return { ok: false, status: 404, error: `没有实例 ${instanceId}` }
   }
+  // 兼容旧调用方：只传 wakeEnabled/eventWakeEnabled 时也映射到唯一的 wakeDriver。
+  const effectivePatch = { ...(patch ?? {}) }
+  if (!Object.prototype.hasOwnProperty.call(effectivePatch, 'wakeDriver')) {
+    const current = (before.instances ?? []).find((item) => item.id === instanceId)
+    if (effectivePatch.wakeEnabled === true) effectivePatch.wakeDriver = 'timer'
+    else if (effectivePatch.eventWakeEnabled === true) effectivePatch.wakeDriver = 'event'
+    else if (effectivePatch.wakeEnabled === false && current?.wakeDriver === 'timer') effectivePatch.wakeDriver = 'off'
+    else if (effectivePatch.eventWakeEnabled === false && current?.wakeDriver === 'event') effectivePatch.wakeDriver = 'off'
+  }
   // 记下改之前是否启用：false → true 要自动开窗（和「停用即关窗」对称）
   const wasEnabled = (before.instances ?? []).find((item) => item.id === instanceId)?.enabled !== false
-  const list = (before.instances ?? []).map((item) => (item.id === instanceId ? { ...item, ...patch } : item))
+  const list = (before.instances ?? []).map((item) => (item.id === instanceId ? { ...item, ...effectivePatch } : item))
   const normalized = normalizeConfig({ ...before, instances: list })
   const check = validateInstances(normalized.config)
   if (!check.ok) return { ok: false, ...check, config: normalized.config, warnings: normalized.warnings }
@@ -877,7 +1781,7 @@ export function patchInstance(state, instanceId, patch) {
   // 由窗口自己发起的开关（置顶/调整模式）也要回推一次，保证多端配置一致
   try {
     const inst = (state.instances ?? []).find((item) => item.id === instanceId)
-    if (inst) state.windows?.send?.({ type: 'config', patch }, inst.id)
+    if (inst) state.windows?.send?.({ type: 'config', patch: effectivePatch }, inst.id)
   } catch { /* 窗口没开就只落盘 */ }
   // 取消「启用模型」= 真的停用（停循环/停动作/关窗）；反之从关到开就把窗口拉起来，两端对称
   try {
@@ -897,6 +1801,7 @@ export function patchInstance(state, instanceId, patch) {
 /** 停用一个实例：停循环 → 复位动作/唤醒/对话 → 关窗（幂等，窗口没开也安全）。 */
 export function deactivateInstance(state, inst) {
   if (!inst) return { ok: false, code: 'no-instance' }
+  const farewell = sendFarewell(state, inst, 'disabled')
   try { stopPresetSequence(state, inst) } catch { /* 没在跑就算了 */ }
   try {
     instanceView(state, inst).windows?.send?.({ type: 'anim', action: 'idle', timeoutMs: 1200 }, inst.id)
@@ -908,8 +1813,64 @@ export function deactivateInstance(state, inst) {
     inst.chat.resolvedBy = null
   }
   instanceView(state, inst).windows?.send?.({ type: 'thinking', on: false }, inst.id)
-  const closed = closeInstanceWindow(state, inst.id)
-  return { ok: true, instanceId: inst.id, sent: closed?.sent ?? null }
+  let closed = null
+  const isolated = state.configFile && state.configFile !== CONFIG_FILE
+  if (farewell.ok && !isolated) {
+    const timer = setTimeout(() => {
+      try { closeInstanceWindow(state, inst.id) } catch { /* 已关闭 */ }
+    }, 1400)
+    if (typeof timer.unref === 'function') timer.unref()
+  } else {
+    closed = closeInstanceWindow(state, inst.id)
+  }
+  return { ok: true, instanceId: inst.id, sent: closed?.sent ?? null, farewell }
+}
+
+export function farewellText(inst, now = Date.now()) {
+  const hour = new Date(now).getHours()
+  const will = lifeWillingness(inst)
+  if (will.state === 'withdrawn') return '今天有点没精神，我先安静休息了。'
+  if (hour >= 22 || hour < 5) return '不早啦，我先去休息，晚安。'
+  if (will.state === 'tired') return '有点累了，我先去歇一会儿，下次见。'
+  if (Number(inst?.life?.mood) < -0.15) return '我先安静一会儿，回头再找你。'
+  return '那我先休息啦，下次见。'
+}
+
+export function sendFarewell(state, inst, reason = 'shutdown', now = Date.now()) {
+  if (!inst || inst.config?.lifeFarewellEnabled === false) return { ok: false, code: 'farewell-disabled' }
+  if (inst.window?.ready !== true) return { ok: false, code: 'window-not-ready' }
+  const text = farewellText(inst, now)
+  const seq = (inst.bubble?.seq ?? 0) + 1
+  inst.bubble = {
+    ...(inst.bubble ?? {}),
+    seq,
+    bubbleCount: (inst.bubble?.bubbleCount ?? 0) + 1,
+    lastIdentity: textIdentity(text),
+    lastAt: now,
+    lastShown: new Date(now).toISOString(),
+  }
+  let sent = null
+  try {
+    const view = instanceView(state, inst)
+    view.windows.send({ type: 'anim', action: 'nod', timeoutMs: 1800 })
+    view.windows.send({ type: 'look-at', mode: 'user', durationMs: 1800 })
+    sent = view.windows.send({
+      type: 'bubble',
+      text,
+      format: 'text',
+      seq,
+      durationMs: 1200,
+      source: `farewell-${reason}`,
+    })
+  } catch (error) {
+    return { ok: false, code: 'farewell-send-failed', error: errorText(error) }
+  }
+  inst.life = {
+    ...(inst.life ?? createLifeRuntime({}, now)),
+    lastEventAt: now,
+    lastEvent: `farewell-${reason}`,
+  }
+  return { ok: sent?.ok !== false, text, sent: sent ?? null }
 }
 
 /** 调整框松手：把窗口真实几何写回该实例的配置（夹到边界，不回落默认）。 */
@@ -946,6 +1907,71 @@ function normalizeReplyStyle(value, warnings) {
   if (value === 'bubble' || value === 'card') return value
   warnings.push(`replyStyle 取值 ${JSON.stringify(value)} 非法（合法 bubble / card），已回落 bubble`)
   return 'bubble'
+}
+
+export const BUBBLE_SKINS = ['classic', 'cloud', 'signboard', 'note']
+
+function normalizeBubbleSkin(value, warnings) {
+  if (value === undefined || value === null) return DEFAULT_INSTANCE.bubbleSkin
+  if (BUBBLE_SKINS.includes(value)) return value
+  warnings.push(`bubbleSkin 取值 ${JSON.stringify(value)} 非法（合法 ${BUBBLE_SKINS.join(' / ')}），已回落 classic`)
+  return 'classic'
+}
+
+export const WAKE_DRIVERS = ['off', 'timer', 'event']
+
+/**
+ * 定时唤醒与事件唤醒只允许选一个。旧配置里两个布尔值同时为 true 时，
+ * 保留更早、更可预测的定时唤醒，并给出告警。
+ */
+export function normalizeWakeDriver(source = {}, warnings = []) {
+  if (WAKE_DRIVERS.includes(source.wakeDriver)) return source.wakeDriver
+  if (source.wakeDriver !== undefined && source.wakeDriver !== null) {
+    warnings.push(`wakeDriver 取值 ${JSON.stringify(source.wakeDriver)} 非法（合法 off / timer / event），已按旧开关推断`)
+  }
+  if (source.wakeEnabled === true && source.eventWakeEnabled === true) {
+    warnings.push('定时唤醒与事件唤醒不能同时启用，已保留定时唤醒')
+    return 'timer'
+  }
+  if (source.eventWakeEnabled === true) return 'event'
+  if (source.wakeEnabled === true) return 'timer'
+  return 'off'
+}
+
+export function lifeStatusSnapshot(inst) {
+  const life = inst?.life ?? {}
+  const config = inst?.config ?? {}
+  return {
+    enabled: config.lifeEnabled !== false,
+    nonverbalEnabled: config.lifeNonverbalEnabled !== false,
+    audienceAwareEnabled: config.audienceAwareEnabled !== false,
+    memoryEnabled: config.memoryEnabled === true,
+    dualRelationEnabled: config.dualRelationEnabled !== false,
+    wakeDriver: config.wakeDriver ?? 'off',
+    attention: life.attention ?? 'unknown',
+    audience: life.audience ?? 'unknown',
+    willingness: life.willingness ?? 'social',
+    energy: Number(life.energy) || 0,
+    mood: Number(life.mood) || 0,
+    boredom: Number(life.boredom) || 0,
+    closeness: Number(life.closeness) || 0,
+    peerAffinity: Number(life.peerAffinity) || 0,
+    proactiveSinceUser: Number(life.proactiveSinceUser) || 0,
+    dailyShare: Number(life.dailyShare) || 0,
+    dailyShareMax: Number(config.lifeShareBudgetPerDay) || 0,
+    dailyImportant: Number(life.dailyImportant) || 0,
+    dailyImportantMax: Number(config.lifeImportantBudgetPerDay) || 0,
+    lastUserActivityAt: Number(life.lastUserActivityAt) || 0,
+    lastEvent: typeof life.lastEvent === 'string' ? life.lastEvent : 'boot',
+    lastDecision: life.lastDecision ?? null,
+  }
+}
+
+function pushLifeStatus(root, inst) {
+  if (!inst || inst.window?.ready !== true) return
+  try {
+    root?.windows?.send?.({ type: 'life-status', status: lifeStatusSnapshot(inst) }, inst.id)
+  } catch { /* 窗口正在关闭时忽略 */ }
 }
 
 function normalizeLayoutMode(value, warnings) {
@@ -1075,6 +2101,10 @@ export function readConfigFile(file = CONFIG_FILE) {
 // 落盘全部字段会把 crashOnLoad / shellSelfTest 这类验收开关也写进文件，
 // 之后 patch 里的同名配置就永远被文件覆盖（实测导致验收开关失效）。
 export const PERSISTED_KEYS = [
+  // 0.3.2：模型档案（动作/循环按模型共享）+ 路径绑定表 + schema 版本
+  'schemaVersion',
+  'modelProfiles',
+  'modelPathBindings',
   // 多实例：所有实例参数都在这里，镜像字段只用于兼容读取
   'instances',
   'bubbleDurationMs',
@@ -1115,9 +2145,136 @@ export function migrateModeSwitches(state, marker = '0.13.9-mode-switches') {
         changed.push(`${inst.id}.${key}`)
       }
     }
+    if (inst.wakeDriver === 'off') {
+      inst.wakeDriver = 'timer'
+      changed.push(`${inst.id}.wakeDriver`)
+    }
   }
   if (state?.config) state.config.migrated = [...done, marker]
   return changed
+}
+
+/**
+ * 0.3.2 一次性迁移：把实例上的 customActions / presetSequences 搬进「模型档案」。
+ * 流程（用户 m16320 要求）：备份 → 创建/合并档案 → 校验 → 原子写盘 → 确认成功后再清空实例字段 → 迁移报告。
+ * 这个函数只做「计算 + 改内存」，写盘与清空交给调用方（apply），保证「先写盘成功再清空」。
+ */
+export function migrateModelProfiles(state, marker = '0.3.2-model-profiles') {
+  const done = Array.isArray(state?.config?.migrated) ? state.config.migrated : []
+  if (done.includes(marker)) return { changed: false, report: null }
+  const report = { created: [], merged: [], conflicts: [], cleared: [], legacyTargets: [], skipped: [] }
+  const profiles = { ...(state.config.modelProfiles ?? {}) }
+  const bindings = { ...(state.config.modelPathBindings ?? {}) }
+
+  const uniqueId = (base, taken) => {
+    let suffix = 2
+    let next = `${base}-${suffix}`
+    while (taken(next)) {
+      suffix += 1
+      next = `${base}-${suffix}`
+    }
+    return next
+  }
+
+  for (const inst of state.config.instances ?? []) {
+    const key = normalizeModelKey(inst.modelPath)
+    const actions = Array.isArray(inst.customActions) ? inst.customActions : []
+    const seqs = Array.isArray(inst.presetSequences) ? inst.presetSequences : []
+    if (!key || (!actions.length && !seqs.length)) continue
+    const id = bindings[key] ?? profileIdForKey(key)
+    const now = Date.now()
+    let profile = profiles[id]
+    if (!profile) {
+      profile = {
+        id,
+        label: path.basename(key) || key,
+        pathKey: key,
+        modelEntry: '',
+        fingerprint: '',
+        customActions: [],
+        presetSequences: [],
+        createdAt: now,
+        updatedAt: now,
+      }
+      profiles[id] = profile
+      report.created.push(id)
+    }
+    const actionIds = () => new Set(profile.customActions.map((item) => item.id))
+    const seqIds = () => new Set(profile.presetSequences.map((item) => item.id))
+    // 动作：同 id 同内容去重；同 id 不同内容 → 保留两份，后到的加后缀并改写循环步骤引用
+    const renamed = new Map()
+    for (const action of actions) {
+      const norm = normalizeCustomActions([action], [])[0]
+      if (!norm) {
+        report.skipped.push(`${inst.id}:${action?.id ?? '?'}`)
+        continue
+      }
+      const exist = profile.customActions.find((item) => item.id === norm.id)
+      if (!exist) {
+        profile.customActions.push(norm)
+        report.merged.push(`${id}:${norm.id}`)
+        continue
+      }
+      if (JSON.stringify(exist) === JSON.stringify(norm)) continue
+      const nextId = uniqueId(norm.id, (candidate) => actionIds().has(candidate) || BUILTIN_ACTION_IDS.has(candidate))
+      profile.customActions.push({ ...norm, id: nextId })
+      renamed.set(norm.id, nextId)
+      report.conflicts.push({ profileId: id, kind: 'action', from: norm.id, to: nextId })
+    }
+    // 循环：同 id 同内容去重；不同内容加后缀；步骤里被改名的动作同步改写
+    for (const seq of seqs) {
+      const remapped = {
+        ...seq,
+        steps: (Array.isArray(seq.steps) ? seq.steps : []).map((step) => renamed.get(step) ?? step),
+      }
+      const norm = normalizePresetSequences([remapped], [])[0]
+      if (!norm) {
+        report.skipped.push(`${inst.id}:${seq?.id ?? '?'}`)
+        continue
+      }
+      if (Array.isArray(seq.targets) && seq.targets.length) {
+        report.legacyTargets.push({ profileId: id, sequenceId: norm.id, targets: seq.targets })
+      }
+      const exist = profile.presetSequences.find((item) => item.id === norm.id)
+      if (!exist) {
+        profile.presetSequences.push(norm)
+        report.merged.push(`${id}:${norm.id}`)
+        continue
+      }
+      if (JSON.stringify(exist) === JSON.stringify(norm)) continue
+      const nextId = uniqueId(norm.id, (candidate) => seqIds().has(candidate))
+      profile.presetSequences.push({ ...norm, id: nextId })
+      report.conflicts.push({ profileId: id, kind: 'sequence', from: norm.id, to: nextId })
+    }
+    bindings[key] = id
+    profile.updatedAt = now
+  }
+
+  const normalized = normalizeModelProfiles(profiles, [])
+  state.config.modelProfiles = normalized
+  state.config.modelPathBindings = normalizeModelPathBindings(bindings, normalized)
+  state.config.migrated = [...done, marker]
+  // 校验：每个绑定都要指向存在的档案
+  for (const [key, id] of Object.entries(state.config.modelPathBindings)) {
+    if (!normalized[id]) report.skipped.push(`binding:${key}`)
+  }
+  return { changed: true, report, profiles: normalized, bindings: state.config.modelPathBindings }
+}
+
+/** 迁移写盘成功后调用：清空实例上的旧动作/循环字段（此时档案已落盘，丢了也能重建）。 */
+export function clearLegacyInstancePresets(state) {
+  const cleared = []
+  for (const inst of state.config.instances ?? []) {
+    if (Array.isArray(inst.customActions) && inst.customActions.length) {
+      inst.customActions = []
+      cleared.push(`${inst.id}.customActions`)
+    }
+    if (Array.isArray(inst.presetSequences) && inst.presetSequences.length) {
+      inst.presetSequences = []
+      cleared.push(`${inst.id}.presetSequences`)
+    }
+  }
+  return cleared
 }
 
 export function pickPersisted(config) {
@@ -2106,6 +3263,7 @@ function subscribeEvents(ctx, state, eventLog) {
     // 没有 sessionId / session 这两个顶层字段（审查报告 P0-1 指出的就是这里）。
     const eventSessionId = payload?.agent?.session?.id ?? payload?.sessionId ?? payload?.session?.id ?? null
     eventLog.record('agent/status', status ?? payload)
+    if (status === 'running' || status === 'idle') noteAgentLife(state, status, eventSessionId)
     // 阶段 2：agent 空闲时检查有没有待推送的窗口对话回复
     if (status === 'idle') {
       finishChatsEverywhere(state)
@@ -2146,7 +3304,22 @@ function subscribeEvents(ctx, state, eventLog) {
     eventLog.record('session/event', { sessionId: session?.id ?? null, type: event?.type ?? null })
     // 阶段 1：「当前会话」的解析依据之一 —— 最近有用户消息的会话
     try {
-      if (event?.type === 'user/message' && session?.id) state.recentSessionId = session.id
+      if (event?.type === 'user/message' && session?.id) {
+        state.recentSessionId = session.id
+        markUserActivity(state, session.id, 'chat')
+        // 用户重新提到休眠记忆时，在本地立刻恢复为“想起来了”。
+        // 这一步只处理当前 session 自己的记忆，不读取也不串用别的对话。
+        // DSH 的真实 user/message 正文在 event.data.message.content；兼容直接把
+        // message 放在 event.data 的测试/旧载荷。
+        const userText = messageText(event.data?.message ?? event.data)
+        if (userText) {
+          for (const inst of state.instances ?? []) {
+            if (String(inst.config?.sessionId ?? '') === String(session.id) && inst.config?.memoryEnabled === true) {
+              searchMemories(state, session.id, userText, 8)
+            }
+          }
+        }
+      }
       // 缓存事件里的 session 对象：会话没在 GUI 打开时 sessions.get 拿不到，
       // 自动气泡（idle 推）要靠这份缓存
       if (session?.id && typeof session.deriveMessages === 'function') {
@@ -2732,7 +3905,7 @@ async function runSelfTest(ctx, state) {
     label: 'HTTP 路由挂载',
     ok: state.routesRegistered === true,
     detail: state.routesRegistered
-      ? '/live2d/{health,diag,panel,config,bubble,model/reload,window,inject}'
+      ? '/live2d/{health,diag,panel,config,bubble,model/reload,preset,window,inject,ui-command}'
       : '未注册（宿主没有 webServer 服务）',
   })
 
@@ -2955,6 +4128,7 @@ export function scanModels(state, io = {}) {
 export function instanceSummary(ctx, state, inst) {
   if (!inst) return null
   const sessionTitle = instanceTitle(state, inst)
+  const memoryRows = listMemories(state, inst.config?.sessionId ?? '')
   return {
     id: inst.id,
     isDefault: state.instances?.[0]?.id === inst.id,
@@ -2967,6 +4141,11 @@ export function instanceSummary(ctx, state, inst) {
     boundLabel: inst.config.sessionId ? `已绑定：${sessionTitle || inst.config.sessionId.slice(0, 8)}` : '未绑定会话',
     modelPath: inst.config.modelPath,
     modelKey: normalizeModelKey(inst.config.modelPath),
+    // 0.3.2：这只模型对应的「动作档案」（同一模型的实例共享同一份）
+    profile: (() => {
+      const profile = profileFor(state, inst)
+      return profile ? { id: profile.id, label: profile.label, customActions: profile.customActions.length, presetSequences: profile.presetSequences.length } : null
+    })(),
     model: inst.model
       ? { ok: inst.model.ok === true, reason: inst.model.reason ?? null, entry: inst.model.entry ?? null, format: inst.model.format ?? null }
       : null,
@@ -2997,6 +4176,14 @@ export function instanceSummary(ctx, state, inst) {
     },
     // 定时读屏的结果（只有 screenWatchEnabled 打开且读过之后才有）
     screen: inst.screen ?? null,
+    memory: {
+      enabled: inst.config?.memoryEnabled === true,
+      count: memoryRows.filter((item) => !item.dormant).length,
+      dormantCount: memoryRows.filter((item) => item.dormant).length,
+      sessionId: inst.config?.sessionId ?? null,
+      maxEntries: inst.config?.memoryMaxEntries ?? 100,
+    },
+    life: inst.life ? lifeStatusSnapshot(inst) : null,
     warnings: inst.warnings ?? [],
   }
 }
@@ -3111,7 +4298,7 @@ export function openInstanceWindow(state, instanceId) {
   inst.window.pushedTitle = title || null
   const sent = state.windows.send?.({
       type: 'pool:create',
-      config: windowConfigPayload(inst.config, buildPresets(inst)),
+      config: windowConfigPayload(inst.config, buildPresets(inst, profileFor(state, inst)), lifeStatusSnapshot(inst)),
       title,
       sessionId: inst.config.sessionId || null,
     },
@@ -3252,20 +4439,45 @@ export function designAction(label, description) {
 
 /**
  * 窗口要显示/播放的预设动作。
- * 内置动作 + 该实例的自定义动作（带关键帧定义，窗口直接用）+ 循环序列。
+ *
+ * 内置动作仍留在渲染层和 ANIM_WHITELIST 里，供摸头、生命感和旧调用使用；
+ * 但它们按大肥鱼参数写死，不能作为跨模型菜单项展示。菜单只下发当前模型
+ * 可验证的默认动作、模型自带能力，以及用户/AI 的自定义动作。
  */
-export function buildPresets(inst) {
-  const actions = ANIM_WHITELIST.map((id) => ({ id, label: BUILTIN_ACTION_LABELS[id] ?? id, kind: 'builtin' }))
-  for (const custom of inst?.config?.customActions ?? []) {
-    actions.push({ id: custom.id, label: custom.label, kind: 'custom', durationMs: custom.durationMs, tracks: custom.tracks })
+export function buildPresets(inst, profile = null) {
+  // 0.3.2：动作/循环来自「模型档案」；没传档案时退回实例字段（兼容测试与旧调用）
+  const customActions = profile?.customActions ?? inst?.config?.customActions ?? []
+  const presetSequences = profile?.presetSequences ?? inst?.config?.presetSequences ?? []
+  const customIds = new Set(customActions.map((item) => item?.id).filter(Boolean))
+  const actions = customActions.map((custom) => ({
+    id: custom.id,
+    label: custom.label,
+    kind: 'custom',
+    durationMs: custom.durationMs,
+    tracks: custom.tracks,
+  }))
+  // 0.4.0：按模型能力自动挑的默认动作（与用户自定义动作同构，渲染层一视同仁）
+  for (const auto of profile?.autoActions ?? []) {
+    // 同 id 自定义动作是 AI/用户给默认动作做的覆盖层；只显示覆盖后的版本。
+    if (customIds.has(auto.id)) continue
+    actions.push({ id: auto.id, label: auto.label, kind: 'custom', auto: true, durationMs: auto.durationMs, tracks: auto.tracks })
   }
-  const sequences = (inst?.config?.presetSequences ?? []).map((seq) => ({
+  // 0.5.0：从 Exp3/Animation 扫出来的表情、换装、手势（hold=true，再点一次取消）
+  for (const cap of profile?.capabilityActions ?? []) {
+    if (customIds.has(cap.id)) continue
+    actions.push({
+      id: cap.id, label: cap.label, kind: 'custom', auto: true, capability: true,
+      hold: cap.hold === true, group: cap.group ?? '', desc: cap.desc ?? '',
+      durationMs: cap.durationMs, tracks: cap.tracks,
+    })
+  }
+  const sequences = presetSequences.map((seq) => ({
     id: seq.id, label: seq.label, steps: seq.steps, intervalMs: seq.intervalMs,
   }))
-  return { actions, sequences, activeSequence: inst?.presetRun?.id ?? null }
+  return { actions, sequences, activeSequence: inst?.presetRun?.id ?? null, profileId: profile?.id ?? null }
 }
 
-export function windowConfigPayload(config, presets = null) {
+export function windowConfigPayload(config, presets = null, life = null) {
   return {
     windowWidth: config.windowWidth,
     windowHeight: config.windowHeight,
@@ -3279,6 +4491,7 @@ export function windowConfigPayload(config, presets = null) {
     modelPassthrough: config.modelPassthrough === true,
     adjustMode: config.adjustMode === true,
     replyStyle: config.replyStyle === 'card' ? 'card' : 'bubble',
+    bubbleSkin: BUBBLE_SKINS.includes(config.bubbleSkin) ? config.bubbleSkin : 'classic',
     replyOpacity: config.replyOpacity,
     // 阶段 4：回答区的字号与最大高度（%），窗口按这两个值渲染并可滚动
     replyFontSize: config.replyFontSize,
@@ -3301,7 +4514,12 @@ export function windowConfigPayload(config, presets = null) {
     idlePresets: config.idlePresets !== false,
     // 0.13.0：模式与唤醒状态（窗口工具栏按钮要用）
     mode: config.mode === 'auto' || config.mode === 'semi' ? config.mode : 'manual',
+    wakeDriver: WAKE_DRIVERS.includes(config.wakeDriver) ? config.wakeDriver : 'off',
     wakeEnabled: config.wakeEnabled === true,
+    eventWakeEnabled: config.eventWakeEnabled === true,
+    lifeEnabled: config.lifeEnabled !== false,
+    lifeFarewellEnabled: config.lifeFarewellEnabled !== false,
+    life: life ?? null,
     wakeBusy: false,
     // 0.13.4：窗口自己算「思考超时」提示要用（之前漏发，改过超时的实例窗口仍按 90s 算）
     chatTimeoutMs: config.chatTimeoutMs,
@@ -3317,7 +4535,7 @@ export function initPayload(state, extra = {}) {
     title: extra.title ?? '',
     // 有 sessionId 但标题暂时解析不到时，窗口显示「会话 xxxxxxxx」而不是「未绑定会话」
     sessionId: state.config?.sessionId || extra.sessionId || null,
-    config: windowConfigPayload(state.config, buildPresets(state)),
+    config: windowConfigPayload(state.config, buildPresets(state, state.profile ?? null), lifeStatusSnapshot(state)),
     model: model
       ? {
           ok: model.ok === true,
@@ -3373,6 +4591,11 @@ export function applyWindowMessage(state, message) {
   // 以前只有 ready 才写 windowBounds，导致「改几何」的工具永远等不到回报（window-timeout）。
   if (type === 'bounds' && message.bounds) {
     const b = message.bounds
+    if (message.transient === true) {
+      state.windowBounds = { ...b, at: Date.now() }
+      if (state.window) state.window.bounds = { ...b }
+      return
+    }
     // applyBounds = clamp + patchInstance + 写盘（拖动松手时的原始通道，行为保持不变）
     if (typeof state.applyBounds === 'function') {
       try { state.applyBounds({ x: b.x, y: b.y, width: b.width, height: b.height }) } catch { /* 只影响持久化 */ }
@@ -3387,6 +4610,20 @@ export function applyWindowMessage(state, message) {
     // at 用来让「改几何」的工具判断这次回报是不是它触发的那一次
     state.windowBounds = { ...landed, at: Date.now() }
     if (state.window) state.window.bounds = landed
+    return
+  }
+  if (type === 'idle-state') {
+    const root = state.root ?? state
+    const idleSeconds = Number(message.idleSeconds)
+    root.lifeSystem = {
+      ...(root.lifeSystem ?? {}),
+      idleSeconds: Number.isFinite(idleSeconds) ? Math.max(0, idleSeconds) : null,
+      at: Number(message.at) || Date.now(),
+    }
+    if (state.life) {
+      state.life.systemIdleSec = root.lifeSystem.idleSeconds
+      state.life.systemIdleAt = root.lifeSystem.at
+    }
     return
   }
   if (type === 'state') {
@@ -3427,6 +4664,14 @@ export function applyWindowMessage(state, message) {
         at: new Date().toISOString(),
         count: Number(message.count) || 0,
         params: Array.isArray(message.params) ? message.params.map(String).slice(0, 300) : [],
+      }
+      // 0.4.0：按这只模型真实有的参数挑默认动作（参数集没变不会重复写）
+      const owner = state.root ? findInstance(state.root, state.id) : null
+      if (owner) owner.rendererParams = { at: new Date().toISOString(), params: state.renderer.params.params }
+      try {
+        ensureAutoActions(state, owner ?? state)
+      } catch (error) {
+        state.renderer.autoActionsError = errorText(error)
       }
     }
     // 每个动作在这只模型上能落到几轨（0 轨 = 这个模型做不了，设置页置灰）
@@ -3519,16 +4764,38 @@ export function applyWindowMessage(state, message) {
     }
     return
   }
+  if (type === 'preset-refresh') {
+    const owner = state.root ? findInstance(state.root, state.id) : null
+    if (owner) pushPresetsToWindow(state.root, owner)
+    return
+  }
+  if (type === 'drag') {
+    // 窗口正在被拖动/调整：双模型互动跳过它，别对着一个正在移动的模型做反应
+    const owner = state.root ? findInstance(state.root, state.id) : null
+    if (owner) owner.window = { ...(owner.window ?? {}), dragging: message.active === true }
+    return
+  }
   if (type === 'tap') {
     // 用户点了模型（预设交互）：窗口只负责报坐标区域，动作选择和冷却都在宿主
     const owner = state.root ? findInstance(state.root, state.id) : null
-    if (owner) handlePresetTap(state.root, owner, message.zone === 'head' ? 'head' : 'body', state.logger)
+    if (owner) {
+      markUserActivity(state.root, owner.config?.sessionId ?? null, 'tap')
+      const zone = ['hair', 'face', 'hand', 'head', 'body'].includes(message.zone) ? message.zone : 'body'
+      const gesture = ['tap', 'double', 'long', 'pat'].includes(message.gesture) ? message.gesture : 'tap'
+      handlePresetTap(state.root, owner, zone, state.logger, gesture)
+    }
     return
   }
   if (type === 'preset-play') {
     // 右键菜单点了某个动作：立刻播（用户行为，不走模式守卫/冷却）
     const owner = state.root ? findInstance(state.root, state.id) : null
-    if (owner) playPreset(state.root, owner, message.action, state.logger)
+    if (owner) {
+      const result = playPreset(state.root, owner, message.action, state.logger)
+      if (!result.ok) {
+        pushPresetsToWindow(state.root, owner)
+        notifyInstance(state.root, owner, `这个动作不属于当前模型档案（${result.code || 'unknown'}），菜单已经刷新。`, 4000)
+      }
+    }
     return
   }
   if (type === 'preset-sequence') {
@@ -3537,7 +4804,27 @@ export function applyWindowMessage(state, message) {
     if (!owner) return
     const id = String(message.id ?? '')
     if (owner.presetRun?.id === id) stopPresetSequence(state.root, owner)
-    else startPresetSequence(state.root, owner, id, state.logger)
+    else {
+      const started = startPresetSequence(state.root, owner, id, state.logger)
+      if (!started.ok) {
+        pushPresetsToWindow(state.root, owner)
+        notifyInstance(state.root, owner, '这个循环不属于当前模型档案，菜单已经刷新。', 4000)
+      }
+    }
+    return
+  }
+  if (type === 'preset-sequence-stop') {
+    const owner = state.root ? findInstance(state.root, state.id) : null
+    if (owner) stopPresetSequence(state.root, owner)
+    return
+  }
+  if (type === 'open-settings') {
+    const owner = state.root ? findInstance(state.root, state.id) : null
+    queueUiCommand(state.root, 'open-settings', {
+      section: 'actions',
+      instanceId: owner?.id ?? state.id ?? null,
+      profileId: owner ? profileFor(state.root, owner)?.id ?? null : null,
+    })
     return
   }
   if (type === 'set-mode') {
@@ -3556,7 +4843,7 @@ export function applyWindowMessage(state, message) {
       if (cfg.screenReadEnabled !== true) missing.push('读屏·前台标题')
       if (cfg.screenCaptureEnabled !== true) missing.push('允许截图')
       if (next === 'manual' && cfg.aiMoveEnabled !== true) missing.push('交给 AI 移动窗口')
-      if (next !== 'auto' && cfg.wakeEnabled !== true) missing.push('定时唤醒')
+      if (next !== 'auto' && cfg.wakeDriver === 'off') missing.push('主动感知方式（定时或事件）')
       if (next === 'auto') {
         notifyInstance(state.root, owner, '已切到「手动」：我不会自己动，只有你点 ⚡ 或摸模型才回应。')
       } else if (next === 'semi') {
@@ -3582,6 +4869,7 @@ export function applyWindowMessage(state, message) {
     // 工具栏点了 ⚡：按钮唤醒（来源 wake-button，受滚动额度限制）
     const owner = state.root ? findInstance(state.root, state.id) : null
     if (!owner) return
+    markUserActivity(state.root, owner.config?.sessionId ?? null, 'wake-button')
     const result = requestWake(state.root, owner, 'wake-button', state.logger)
     if (result.ok !== true) {
       // 没开起来：把按钮的忙碌态推回去（窗口不再本地定时清除）
@@ -3714,7 +5002,7 @@ export function collectSessionsForPicker(ctx, limit = 50, dir = SESSION_PROJCACH
     }
   }
   try {
-    // 目录里不只有会话：还有 bili-whale.json 这类工作区级缓存。
+    // 目录里不只有会话：还有工作区级缓存文件（非会话记录）也要跳过。
     // 只认带 `session-` 前缀的 UUID 文件——不带前缀的是 subagent 子会话，
     // 硬拼成 session-<uuid> 会列出根本不存在的对话（显示成「无标题」）。
     const isSessionFile = (name) => /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i.test(name)
@@ -4017,6 +5305,7 @@ export function submitChat(ctx, state, log, body) {
   }
 
   const requestId = `chat-${randomUUID()}`
+  markUserActivity(rootState, target.sessionId, 'chat')
   const message = {
     id: `live2d-chat-${randomUUID()}`,
     role: 'user',
@@ -4104,8 +5393,333 @@ export const BUILTIN_ACTION_LABELS = {
 
 const BUILTIN_ACTION_IDS = new Set(ANIM_WHITELIST)
 
+// --- 动作词条库（0.4.0）-------------------------------------------------------
+// 起因：内置 12 个动作写死「大肥鱼」的参数（PARAM_EXP3~8 等），换到没这些参数的模型上，
+// 缺轨被静默跳过 → 用户看到「动作做不出来」。改成词条库：每条只声明自己要哪几个逻辑参数，
+// 模型加载后按它的真实参数筛出「所有轨道都落得下」的，挑 10 条写进模型档案当默认动作。
+// pool 决定优先级：core（标准参数，人人有）> special（模型专属参数）> exp（表情贴图参数）。
+export const ACTION_LIBRARY = [
+  // 通用池：只依赖 Cubism 标准参数
+  { id: 'nod', label: '点头', desc: '头往下点几下', pool: 'core', durationMs: 2200, repeat: 3,
+    needs: ['headY'], tracks: [{ param: 'headY', keys: [[0, 0], [0.2, -26], [0.6, -24], [1, 0]] }] },
+  { id: 'shake', label: '摇头', desc: '左右摇两次头', pool: 'core', durationMs: 2000, repeat: 2,
+    needs: ['headX'], tracks: [{ param: 'headX', keys: [[0, 0], [0.22, 24], [0.62, -22], [1, 0]] }] },
+  { id: 'tilt', label: '歪头', desc: '头歪向一侧停一下', pool: 'core', durationMs: 2000,
+    needs: ['headZ', 'headX'], tracks: [
+      { param: 'headZ', keys: [[0, 0], [0.15, 18], [0.8, 16], [1, 0]] },
+      { param: 'headX', keys: [[0, 0], [0.15, 8], [0.8, 6], [1, 0]] },
+    ] },
+  { id: 'blink', label: '眨眼', desc: '连眨三次', pool: 'core', durationMs: 900, repeat: 3,
+    needs: ['eyeOpenL', 'eyeOpenR'], tracks: [
+      { param: 'eyeOpenL', keys: [[0, 1], [0.3, 0.02], [0.6, 0.02], [1, 1]] },
+      { param: 'eyeOpenR', keys: [[0, 1], [0.3, 0.02], [0.6, 0.02], [1, 1]] },
+    ] },
+  { id: 'wink-l', label: '眨左眼', desc: '睁一只眼闭一只眼', pool: 'core', durationMs: 1200,
+    needs: ['eyeOpenL', 'mouthForm'], tracks: [
+      { param: 'eyeOpenL', keys: [[0, 1], [0.25, 0.04], [0.8, 0.04], [1, 1]] },
+      { param: 'mouthForm', keys: [[0, 0], [0.25, 0.7], [0.8, 0.7], [1, 0]] },
+    ] },
+  { id: 'wink-r', label: '眨右眼', desc: '另一只眼眨一下', pool: 'core', durationMs: 1200,
+    needs: ['eyeOpenR', 'mouthForm'], tracks: [
+      { param: 'eyeOpenR', keys: [[0, 1], [0.25, 0.04], [0.8, 0.04], [1, 1]] },
+      { param: 'mouthForm', keys: [[0, 0], [0.25, 0.7], [0.8, 0.7], [1, 0]] },
+    ] },
+  { id: 'look', label: '东张西望', desc: '眼珠左右看，头跟着转', pool: 'core', durationMs: 2600,
+    needs: ['eyeBallX', 'headX'], tracks: [
+      { param: 'eyeBallX', keys: [[0, 0], [0.2, 0.9], [0.5, -0.9], [0.8, 0.5], [1, 0]] },
+      { param: 'headX', keys: [[0, 0], [0.2, 12], [0.5, -12], [0.8, 6], [1, 0]] },
+    ] },
+  { id: 'smile', label: '微笑', desc: '嘴角上扬、嘴微张', pool: 'core', durationMs: 1600,
+    needs: ['mouthForm', 'mouthOpen'], tracks: [
+      { param: 'mouthForm', keys: [[0, 0], [0.2, 1], [0.8, 0.9], [1, 0]] },
+      { param: 'mouthOpen', keys: [[0, 0], [0.2, 0.3], [0.8, 0.25], [1, 0]] },
+    ] },
+  { id: 'talk', label: '张嘴说话', desc: '嘴连续开合几次', pool: 'core', durationMs: 1200, repeat: 3,
+    needs: ['mouthOpen'], tracks: [
+      { param: 'mouthOpen', keys: [[0, 0], [0.3, 0.7], [0.6, 0.15], [1, 0]] },
+    ] },
+  { id: 'lean', label: '身体前倾', desc: '身子往一侧歪一下', pool: 'core', durationMs: 2000,
+    needs: ['bodyX'], tracks: [
+      { param: 'bodyX', keys: [[0, 0], [0.2, 10], [0.8, 8], [1, 0]] },
+    ] },
+  { id: 'surprise-eyes', label: '瞪大眼', desc: '眼睛睁大、嘴张开', pool: 'core', durationMs: 1600,
+    needs: ['eyeOpenL', 'eyeOpenR', 'mouthOpen'], tracks: [
+      { param: 'eyeOpenL', keys: [[0, 1], [0.18, 1.5], [0.75, 1.35], [1, 1]] },
+      { param: 'eyeOpenR', keys: [[0, 1], [0.18, 1.5], [0.75, 1.35], [1, 1]] },
+      { param: 'mouthOpen', keys: [[0, 0], [0.18, 0.85], [0.75, 0.7], [1, 0]] },
+    ] },
+  { id: 'brow-up', label: '挑眉', desc: '眉毛挑起来', pool: 'core', durationMs: 1400,
+    needs: ['browLY', 'browRY'], tracks: [
+      { param: 'browLY', keys: [[0, 0], [0.2, 1], [0.8, 0.9], [1, 0]] },
+      { param: 'browRY', keys: [[0, 0], [0.2, 1], [0.8, 0.9], [1, 0]] },
+    ] },
+  { id: 'frown', label: '皱眉', desc: '眉毛压低、嘴角往下', pool: 'core', durationMs: 1800,
+    needs: ['browLY', 'browRY', 'mouthForm'], tracks: [
+      { param: 'browLY', keys: [[0, 0], [0.2, -1], [0.8, -0.9], [1, 0]] },
+      { param: 'browRY', keys: [[0, 0], [0.2, -1], [0.8, -0.9], [1, 0]] },
+      { param: 'mouthForm', keys: [[0, 0], [0.2, -0.8], [0.8, -0.7], [1, 0]] },
+    ] },
+  { id: 'nod-tilt', label: '点头歪头', desc: '点头的同时歪一下', pool: 'core', durationMs: 2400,
+    needs: ['headY', 'headZ'], tracks: [
+      { param: 'headY', keys: [[0, 0], [0.25, -20], [0.6, -6], [1, 0]] },
+      { param: 'headZ', keys: [[0, 0], [0.25, 10], [0.7, 12], [1, 0]] },
+    ] },
+  // 模型专属参数：一些精致模型自带（如鼓脸、惊讶嘴型、瞳孔位移）
+  { id: 'cheek-puff', label: '鼓脸', desc: '脸颊鼓起来', pool: 'special', durationMs: 2000,
+    needs: ['cheekPuff'], tracks: [
+      { param: 'cheekPuff', keys: [[0, 0], [0.2, 1], [0.8, 1], [1, 0]] },
+    ] },
+  { id: 'shock-mouth', label: '惊讶张嘴', desc: '用模型的惊讶嘴型', pool: 'special', durationMs: 1800,
+    needs: ['shockL', 'shockR'], tracks: [
+      { param: 'shockL', keys: [[0, 0], [0.2, 1], [0.8, 1], [1, 0]] },
+      { param: 'shockR', keys: [[0, 0], [0.2, 1], [0.8, 1], [1, 0]] },
+    ] },
+  { id: 'pupil-look', label: '瞳孔游移', desc: '眼珠（瞳孔）左右移动', pool: 'special', durationMs: 2000,
+    needs: ['pupilX', 'pupilY'], tracks: [
+      { param: 'pupilX', keys: [[0, 0], [0.25, 0.8], [0.6, -0.8], [1, 0]] },
+      { param: 'pupilY', keys: [[0, 0], [0.25, 0.3], [0.6, -0.3], [1, 0]] },
+    ] },
+  // 表情贴图池：靠模型的 EXP* 参数（大肥鱼这类模型有，很多模型没有 → 会自动跳过）
+  { id: 'blush', label: '脸红', desc: '腮红贴图 + 歪头', pool: 'exp', durationMs: 3200,
+    needs: ['blush'], tracks: [
+      { param: 'blush', keys: [[0, 0], [0.12, 1], [0.86, 1], [1, 0]] },
+      { param: 'headX', keys: [[0, 0], [0.12, 16], [0.86, 13], [1, 0]] },
+    ] },
+  { id: 'shock', label: '震惊', desc: 'O_O 圆眼贴图', pool: 'exp', durationMs: 1600,
+    needs: ['shockEye'], tracks: [
+      { param: 'shockEye', keys: [[0, 0], [0.18, 1], [0.75, 1], [1, 0]] },
+    ] },
+  { id: 'xeyes', label: 'X X 眼', desc: '晕过去的眼睛', pool: 'exp', durationMs: 1400,
+    needs: ['xeyes'], tracks: [
+      { param: 'xeyes', keys: [[0, 0], [0.2, 1], [0.75, 1], [1, 0]] },
+    ] },
+  { id: 'drool', label: '流口水', desc: '嘴角口水贴图', pool: 'exp', durationMs: 2600,
+    needs: ['drool'], tracks: [
+      { param: 'drool', keys: [[0, 0], [0.2, 1], [0.85, 1], [1, 0]] },
+    ] },
+  { id: 'dark-face', label: '脸黑', desc: '阴沉的脸色贴图', pool: 'exp', durationMs: 2400,
+    needs: ['darkFace'], tracks: [
+      { param: 'darkFace', keys: [[0, 0], [0.15, 1], [0.85, 1], [1, 0]] },
+    ] },
+  { id: 'happy', label: '开心笑', desc: '笑眼 + 笑嘴', pool: 'exp', durationMs: 2000,
+    needs: ['eyeSmile', 'mouthForm', 'mouthOpen'], tracks: [
+      { param: 'eyeSmile', keys: [[0, 0], [0.18, 1], [0.82, 1], [1, 0]] },
+      { param: 'mouthForm', keys: [[0, 0], [0.18, 1], [0.82, 0.9], [1, 0]] },
+      { param: 'mouthOpen', keys: [[0, 0], [0.18, 0.55], [0.82, 0.45], [1, 0]] },
+    ] },
+]
+
+/** 逻辑参数名 → 各模型里可能的真实参数名（与 renderer.js 的 PARAM_ALIASES 保持一致，另加 EXP/专属）。 */
+const LIBRARY_PARAM_ALIASES = {
+  headX: ['ParamAngleX'],
+  headY: ['ParamAngleY'],
+  headZ: ['ParamAngleZ'],
+  bodyX: ['ParamBodyAngleX'],
+  bodyY: ['ParamBodyAngleY'],
+  eyeOpenL: ['ParamEyeLOpen'],
+  eyeOpenR: ['ParamEyeROpen'],
+  eyeBallX: ['ParamEyeBallX'],
+  eyeBallY: ['ParamEyeBallY'],
+  mouthOpen: ['ParamMouthOpenY'],
+  mouthForm: ['ParamMouthForm'],
+  browLY: ['ParamBrowLY'],
+  browRY: ['ParamBrowRY'],
+  eyeSmile: ['ParamEyeSmile', 'EyeSmile'],
+  cheekPuff: ['CheeckPuff', 'CheekPuff', 'ParamCheek'],
+  shockL: ['ShockL'],
+  shockR: ['ShockR'],
+  pupilX: ['PupilX'],
+  pupilY: ['PupilY'],
+  blush: ['PARAM_EXP4'],
+  shockEye: ['PARAM_EXP5'],
+  // 大肥鱼实测：EXP3 = X 眼、EXP6 = 脸黑、EXP7 = 流口水（早期动作实现已验证过）
+  xeyes: ['PARAM_EXP3'],
+  drool: ['PARAM_EXP7'],
+  darkFace: ['PARAM_EXP6'],
+}
+
+function resolveLibraryParam(name, paramSet) {
+  const raw = String(name ?? '')
+  if (!raw) return null
+  if (paramSet.has(raw)) return raw
+  for (const candidate of LIBRARY_PARAM_ALIASES[raw] ?? []) {
+    if (paramSet.has(candidate)) return candidate
+  }
+  return null
+}
+
+/** 模型参数集指纹：参数集合变了（换模型/模型资源更新）就该重新挑默认动作。 */
+export function libraryParamsHash(params) {
+  const list = (Array.isArray(params) ? params : []).map(String).filter(Boolean).sort()
+  if (!list.length) return ''
+  return createHash('sha1').update(list.join('|')).digest('hex').slice(0, 12)
+}
+
+/**
+ * 按模型真实参数挑默认动作：core 先占 7 个（通用、一定明显），再从 special/exp 补 3 个。
+ * 只有「needs 全部解析得到」的词条才会入选——缺一轨就不选，避免又出现「做一半」的动作。
+ */
+export function pickDefaultActions(params, limit = 10) {
+  const set = new Set((Array.isArray(params) ? params : []).map(String))
+  const usable = (entry) => entry.needs.every((name) => resolveLibraryParam(name, set))
+  const core = ACTION_LIBRARY.filter((entry) => entry.pool === 'core' && usable(entry))
+  const extra = ACTION_LIBRARY.filter((entry) => entry.pool !== 'core' && usable(entry))
+  const picked = []
+  const take = (entry) => {
+    if (picked.length >= limit) return
+    if (picked.some((item) => item.id === `auto-${entry.id}`)) return
+    picked.push({
+      id: `auto-${entry.id}`,
+      label: entry.label,
+      desc: entry.desc ?? '',
+      durationMs: entry.durationMs,
+      repeat: entry.repeat ?? 1,
+      // tracks 落成这只模型真实有的参数名：渲染层不用再猜，换模型时靠 hash 重挑
+      tracks: entry.tracks.map((track) => ({
+        param: resolveLibraryParam(track.param, set) ?? track.param,
+        logical: track.param,
+        keys: track.keys.map((pair) => [pair[0], pair[1]]),
+      })),
+    })
+  }
+  for (const entry of core.slice(0, 7)) take(entry)
+  // 剩余名额：先补「表情类」（大肥鱼这类有 PARAM_EXP* 的模型），再补其它专属动作
+  const extraOrdered = [
+    ...extra.filter((entry) => entry.pool === 'exp'),
+    ...extra.filter((entry) => entry.pool !== 'exp'),
+  ]
+  for (const entry of extraOrdered.slice(0, Math.max(0, limit - picked.length))) take(entry)
+  for (const entry of [...core, ...extra]) take(entry)
+  return picked.slice(0, Math.max(1, limit))
+}
+
 /** 外部可用的别名（AI 说 blush 等于 shy，stare 等于 xx）。 */
 export const ANIM_ALIASES = { blush: 'shy', embarrassed: 'shy', stare: 'xx' }
+
+// ---------------------------------------------------------------------------
+// 模型能力扫描（0.5.0）
+// 很多模型包（尤其 VTube Studio 转过来的）把表情/换装放在 Exp3/*.exp3.json 里，
+// 但 model3.json 的 FileReferences 不登记 Expressions —— 引擎默认看不到。
+// 这里直接读文件：把「表情/换装/手势开关」翻译成可执行动作（参数 → 目标值）。
+// ---------------------------------------------------------------------------
+const CAP_EXPR_DIRS = ['Exp3', 'Exp2', 'Exp', 'Expression', 'expressions']
+const CAP_MOTION_DIRS = ['Animation', 'Motion', 'motions', 'animations']
+
+function capabilityGroupOf(param) {
+  const p = String(param ?? '')
+  if (/^clothes/i.test(p)) return 'clothes'
+  if (/^movement/i.test(p) || /^(gesture|hand)/i.test(p)) return 'gesture'
+  if (/^(key\d+|param_exp|exp)/i.test(p)) return 'face'
+  if (/^(head|eye|mouth|brow|body|arm|leg|tail)/i.test(p)) return 'body'
+  return 'other'
+}
+
+/**
+ * 扫一个模型目录，返回它能做什么（不依赖 model3.json 是否登记）。
+ * 只读文件，不碰运行中的窗口；参数是否真的存在由调用方用运行时参数集再筛一遍。
+ */
+export function scanModelCapability(modelPath) {
+  const root = String(modelPath ?? '').trim()
+  const out = { ok: false, root, modelEntries: [], expressions: [], motions: [], warnings: [] }
+  if (!root || !existsSync(root)) {
+    out.warnings.push('模型目录不存在')
+    return out
+  }
+  let names = []
+  try { names = readdirSync(root) } catch (error) {
+    out.warnings.push(`目录读取失败：${error?.message ?? error}`)
+    return out
+  }
+  out.modelEntries = names.filter((name) => /\.model3\.json$/i.test(name))
+  const registered = { expressions: new Set(), motions: new Set() }
+  for (const file of out.modelEntries) {
+    try {
+      const json = JSON.parse(readFileSync(path.join(root, file), 'utf8'))
+      for (const expr of json?.FileReferences?.Expressions ?? []) {
+        if (expr?.Name) registered.expressions.add(String(expr.Name))
+      }
+      const motions = json?.FileReferences?.Motions ?? {}
+      for (const group of Object.keys(motions)) {
+        for (const item of motions[group] ?? []) {
+          if (item?.File) registered.motions.add(String(item.File).replace(/\\/g, '/'))
+        }
+      }
+    } catch (error) {
+      out.warnings.push(`${file} 解析失败：${error?.message ?? error}`)
+    }
+  }
+  let index = 0
+  for (const dir of CAP_EXPR_DIRS) {
+    let files = []
+    try { files = readdirSync(path.join(root, dir)) } catch { continue }
+    for (const file of files.sort()) {
+      if (!/\.exp3?\.json$/i.test(file)) continue
+      let json = null
+      try { json = JSON.parse(readFileSync(path.join(root, dir, file), 'utf8')) } catch { continue }
+      const params = (json?.Parameters ?? [])
+        .filter((item) => item && item.Id)
+        .map((item) => ({
+          param: String(item.Id),
+          value: Number(item.Value) || 0,
+          blend: item.Blend && item.Blend !== 'Add' ? String(item.Blend) : 'Add',
+        }))
+      if (!params.length) continue
+      index += 1
+      const label = file.replace(/\.exp3?\.json$/i, '')
+      out.expressions.push({
+        id: `cap-${createHash('sha1').update(`${dir}/${file}`).digest('hex').slice(0, 6)}`,
+        label,
+        file: `${dir}/${file}`,
+        group: capabilityGroupOf(params[0].param),
+        params,
+        registered: registered.expressions.has(label),
+        index,
+      })
+    }
+  }
+  for (const dir of CAP_MOTION_DIRS) {
+    let files = []
+    try { files = readdirSync(path.join(root, dir)) } catch { continue }
+    for (const file of files.sort()) {
+      if (!/\.motion3\.json$/i.test(file)) continue
+      out.motions.push({
+        label: file.replace(/\.motion3\.json$/i, ''),
+        file: `${dir}/${file}`,
+        registered: registered.motions.has(`${dir}/${file}`),
+      })
+    }
+  }
+  out.ok = true
+  return out
+}
+
+/**
+ * 把能力里的表情/换装翻成动作（hold=true：设完保持，再点一次取消）。
+ * 只有「所有参数都在这只模型的运行时参数集里」的条目才生成，避免半套。
+ */
+export function pickCapabilityActions(capability, params, limit = 24) {
+  const set = new Set((Array.isArray(params) ? params : []).map(String))
+  if (!set.size || !capability?.expressions?.length) return []
+  const out = []
+  for (const expr of capability.expressions) {
+    if (out.length >= limit) break
+    if (!expr.params.length) continue
+    if (!expr.params.every((item) => set.has(item.param))) continue
+    out.push({
+      id: expr.id,
+      label: expr.label,
+      desc: `${expr.group === 'clothes' ? '换装' : expr.group === 'gesture' ? '手势' : expr.group === 'face' ? '表情' : '开关'}（再点一次取消）`,
+      group: expr.group,
+      hold: true,
+      durationMs: 700,
+      tracks: expr.params.map((item) => ({
+        param: item.param,
+        keys: [[0, 'current'], [1, item.value]],
+      })),
+    })
+  }
+  return out
+}
 
 /**
  * 动作指令：白名单校验 → 冷却 → 下发 → 超时回落 idle。
@@ -4120,15 +5734,18 @@ export function handleAnim(state, log, body, source = 'ui') {
   const requested = typeof body.action === 'string' ? body.action.trim().toLowerCase() : ''
   // 别名先归一（blush → shy），再走白名单
   const action = ANIM_ALIASES[requested] || requested
-  // 白名单 = 内置动作 + 该实例的自定义动作（用户/AI 设计并保存的）
-  const custom = (state.config.customActions ?? []).find((item) => item.id === action)
+  // 白名单 = 内置动作 + 该实例的自定义动作 + 按本模型能力生成的默认动作
+  const customList = state.config.customActions ?? []
+  const autoList = state.profile?.autoActions ?? []
+  const capList = state.profile?.capabilityActions ?? []
+  const custom = [...customList, ...autoList, ...capList].find((item) => item.id === action)
   if (!ANIM_WHITELIST.includes(action) && !custom) {
     return {
       status: 400,
       payload: {
         ok: false,
         error: `未知动作 ${requested || '(空)'}`,
-        allowed: [...ANIM_WHITELIST, ...(state.config.customActions ?? []).map((item) => item.id)],
+        allowed: [...ANIM_WHITELIST, ...[...customList, ...autoList].map((item) => item.id)],
       },
     }
   }
@@ -4404,6 +6021,12 @@ export function wakePlan(inst, source = 'wake-timer', now = Date.now()) {
   if (!canControl(inst, 'wake', { source })) {
     return { ok: false, code: 'wake-forbidden', error: `当前模式（${config.mode}）下不允许主动唤醒` }
   }
+  if (source === 'wake-timer' && config.wakeDriver !== 'timer') {
+    return { ok: false, code: 'wake-driver-disabled', error: '当前主动感知方式不是“定时唤醒”' }
+  }
+  if (source === 'wake-event' && config.wakeDriver !== 'event') {
+    return { ok: false, code: 'wake-driver-disabled', error: '当前主动感知方式不是“事件唤醒”' }
+  }
   // 只有「真的在跑」的运行态才算忙：成功/失败/超时都会回到 idle，
   // 历史遗留的 completed/failed 也不能把实例永久锁住（2026-11-05 真机踩到过一次）。
   const running = ['capturing', 'injecting', 'waiting-reply', 'running']
@@ -4494,9 +6117,22 @@ async function collectWakeContext(root, inst, log, options = {}) {
   }
 }
 
-export function buildWakeMessage(inst, info, source, now = Date.now()) {
+export function buildWakeMessage(inst, info, source, now = Date.now(), reason = null, memories = []) {
   const isButton = source === 'wake-button'
-  const lines = [`[主动唤醒 · ${isButton ? '你点了按钮' : '定时感知'} · ${formatClock(now)}]`]
+  const isEvent = source === 'wake-event'
+  const trigger = isButton ? '你点了按钮' : isEvent ? '事件感知' : '定时感知'
+  const lines = [`[主动唤醒 · ${trigger} · ${formatClock(now)}]`]
+  if (isEvent && reason?.detail) lines.push(`触发原因：${reason.detail}`)
+  // 时间感对所有唤醒来源生效：不只是事件唤醒，机械定时和 ⚡ 按钮也不能猜错早晚。
+  const date = new Date(now)
+  const weekdays = ['日', '一', '二', '三', '四', '五', '六']
+  const hour = date.getHours()
+  const period = hour < 5 ? '凌晨' : hour < 9 ? '早上' : hour < 12 ? '上午' : hour < 14 ? '中午' : hour < 18 ? '下午' : hour < 22 ? '晚上' : '深夜'
+  const since = Math.max(0, now - Number(inst?.life?.lastUserActivityAt ?? now))
+  const sinceText = since < 60_000 ? '不到 1 分钟' : since < 3_600_000 ? `约 ${Math.round(since / 60_000)} 分钟` : `约 ${Math.round(since / 3_600_000)} 小时`
+  lines.push(`时间感：${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} 星期${weekdays[date.getDay()]} ${String(hour).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}（${period}）；距离用户上次互动 ${sinceText}。`)
+  lines.push('请按真实时间和最近互动决定语气；不要凭猜测说早上好/晚安，也不要表现得像刚被叫醒。')
+  if (Array.isArray(memories) && memories.length) lines.push(...memories)
   if (info?.title) {
     lines.push(`当前前台窗口：${info.title}${info.process ? `（${info.process}）` : ''}`)
   } else {
@@ -4643,7 +6279,7 @@ export async function wakeUp(root, inst, source = 'wake-timer', log = null, opts
   // 两个上下文开关都关着：定时唤醒不要往里灌一条空消息
   const canTitle = inst.config?.screenReadEnabled === true
   const canShot = inst.config?.wakeCaptureEnabled === true && inst.config?.screenCaptureEnabled === true
-  if (!canTitle && !canShot && source === 'wake-timer') {
+  if (!canTitle && !canShot && source !== 'wake-button') {
     inst.wake = {
       ...(inst.wake ?? {}),
       state: 'idle',
@@ -4651,7 +6287,7 @@ export async function wakeUp(root, inst, source = 'wake-timer', log = null, opts
       source,
       lastResult: { ok: false, code: 'no-context-permission', at: new Date(now).toISOString() },
     }
-    return { ok: false, code: 'no-context-permission', error: '定时唤醒需要「读前台标题」或「唤醒时截图」，当前都关着' }
+    return { ok: false, code: 'no-context-permission', error: '主动感知需要「读前台标题」或「唤醒时截图」，当前都关着' }
   }
 
   // 进运行态：从这里开始任何一条路径结束都必须回到 idle（finally 统一收口）
@@ -4676,7 +6312,8 @@ export async function wakeUp(root, inst, source = 'wake-timer', log = null, opts
     }
 
     const baseline = assistantIdentity(target.session)
-    const text = buildWakeMessage(inst, info, source, now)
+    const memories = memoryPromptLines(root, inst, `${info?.title ?? ''} ${opts.reason?.detail ?? ''}`.trim(), 4)
+    const text = buildWakeMessage(inst, info, source, now, opts.reason ?? null, memories)
     const message = {
       id: `live2d-wake-${randomUUID()}`,
       role: 'user',
@@ -4775,14 +6412,355 @@ export function startWakeLoop(state, log, registerCleanup = () => {}) {
   return timer
 }
 
+// ---------------------------------------------------------------------------
+// P1：陪伴行为循环（宿主侧事件驱动，不新增自我唤醒工具）
+// ---------------------------------------------------------------------------
+
+export function markUserActivity(state, sessionId = null, source = 'activity', now = Date.now()) {
+  let touched = 0
+  for (const inst of state.instances ?? []) {
+    if (!inst.life) inst.life = createLifeRuntime({}, now)
+    const bound = String(inst.config?.sessionId ?? '')
+    if (sessionId && bound !== String(sessionId)) continue
+    inst.life.lastUserActivityAt = now
+    inst.life.mood = Math.min(1, inst.life.mood + 0.08)
+    inst.life.boredom = Math.max(0, inst.life.boredom - 0.18)
+    inst.life.closeness = Math.min(1, inst.life.closeness + 0.005)
+    inst.life.proactiveSinceUser = 0
+    if (source === 'tap' || source === 'chat' || source === 'wake-button') {
+      inst.life.lastModelInteractionAt = now
+    }
+    inst.life.eventCounts.userActivity = (inst.life.eventCounts.userActivity ?? 0) + 1
+    touched += 1
+  }
+  return touched
+}
+
+export function noteAgentLife(state, status, sessionId = null, now = Date.now()) {
+  for (const inst of state.instances ?? []) {
+    const bound = String(inst.config?.sessionId ?? '')
+    if (sessionId && bound !== String(sessionId)) continue
+    if (!inst.life) inst.life = createLifeRuntime({}, now)
+    if (status === 'running') {
+      inst.life.lastAgentStartAt = now
+      inst.life.energy = Math.max(0, inst.life.energy - 0.01)
+    } else if (status === 'idle') {
+      inst.life.lastAgentFinishAt = now
+      inst.life.mood = Math.min(1, inst.life.mood + 0.03)
+    }
+  }
+}
+
+function lifeReactionFor(event) {
+  switch (event?.code) {
+    case 'return-after-absence': return { action: 'happy', lookAt: 'user' }
+    case 'focus-milestone': return { action: 'nod', lookAt: 'cursor' }
+    case 'agent-finished': return { action: 'happy', lookAt: 'user' }
+    case 'app-change': return { action: 'tilt', lookAt: 'cursor' }
+    case 'long-idle': return { action: 'blink', lookAt: 'away' }
+    default: return null
+  }
+}
+
+async function performLifeReaction(root, inst, event, log, deps = {}, now = Date.now()) {
+  if (inst.config?.lifeNonverbalEnabled !== true || !event) return null
+  const will = lifeWillingness(inst)
+  inst.life.willingness = will.state
+  if (!will.nonverbal) return null
+  const cooldown = Math.max(3000, Number(inst.config?.lifeNonverbalCooldownMs) || 12_000)
+  if (now - Number(inst.life?.lastNonverbalAt ?? 0) < cooldown) return null
+  const baseReaction = lifeReactionFor(event)
+  let reaction = will.state === 'tired'
+    ? { action: 'blink', lookAt: 'away' }
+    : baseReaction
+  if (!reaction) return null
+  // P2：没有观众时不做大幅“对空气表演”；只剩呼吸/眨眼由渲染层的待机浮动负责。
+  if (inst.life.audience === 'absent') return null
+  if (inst.life.audience === 'ambient' && reaction.action !== 'blink') {
+    reaction = { action: 'blink', lookAt: 'cursor' }
+  }
+  const view = instanceView(root, inst)
+  let anim = null
+  try {
+    anim = deps.playLifeAction
+      ? await deps.playLifeAction(inst, reaction.action, event)
+      : handleAnim(view, log, { action: reaction.action, auto: true })
+  } catch (error) {
+    logged(log, `live2d: [${inst.id}] 陪伴动作失败（已忽略）：${errorText(error)}`)
+  }
+  try {
+    const look = deps.lookAt
+      ? await deps.lookAt(inst, reaction.lookAt, event)
+      : view.windows.send({ type: 'look-at', mode: reaction.lookAt, durationMs: 5000 })
+    if (look?.ok === false) logged(log, `live2d: [${inst.id}] look-at 下发失败：${look.error ?? 'unknown'}`)
+  } catch { /* 窗口可能未开 */ }
+  inst.life.lastNonverbalAt = now
+  inst.life.lastEventAt = now
+  inst.life.lastEvent = event.code
+  inst.life.eventCounts[event.code] = (inst.life.eventCounts[event.code] ?? 0) + 1
+  return { action: reaction.action, lookAt: reaction.lookAt, anim }
+}
+
+/**
+ * 一次陪伴决策。导出给测试注入 now/idle/title/action/wake 桩，不依赖真实定时器。
+ */
+export async function lifeTick(state, log = null, deps = {}) {
+  const now = Number(deps.now) || Date.now()
+  const instances = (state.instances ?? []).filter((inst) => inst.config?.enabled !== false && inst.config?.lifeEnabled !== false)
+  if (instances.length === 0) return { events: [], reactions: [], verbal: [] }
+
+  if (deps.idleSeconds !== undefined) {
+    state.lifeSystem = {
+      ...(state.lifeSystem ?? {}),
+      idleSeconds: Number.isFinite(Number(deps.idleSeconds)) ? Math.max(0, Number(deps.idleSeconds)) : null,
+      at: now,
+    }
+  }
+
+  // 前台标题只读、限频；一次读取共享给同一轮的所有实例。
+  const titleDue = instances.filter((inst) => {
+    const cfg = inst.config ?? {}
+    return cfg.screenReadEnabled === true
+      && now - Number(inst.life?.lastForegroundReadAt ?? 0) >= Math.max(10_000, Number(cfg.eventWakeTitleIntervalMs) || 30_000)
+  })
+  let foreground = null
+  if (titleDue.length > 0 && typeof (deps.getForegroundTitle ?? getForegroundTitle) === 'function') {
+    try {
+      foreground = await (deps.getForegroundTitle ?? getForegroundTitle)(state, undefined, titleDue[0].config)
+    } catch { foreground = null }
+  }
+
+  const events = []
+  const reactions = []
+  const verbal = []
+  for (const inst of instances) {
+    if (!inst.life) inst.life = createLifeRuntime({}, now)
+    const cfg = inst.config ?? {}
+    if (state.lifeSystem?.at) {
+      inst.life.systemIdleSec = state.lifeSystem.idleSeconds
+      inst.life.systemIdleAt = state.lifeSystem.at
+    }
+    if (titleDue.includes(inst)) inst.life.lastForegroundReadAt = now
+    if (foreground && titleDue.includes(inst)) {
+      if (foreground.ok === true) {
+        const title = String(foreground.title ?? '')
+        const processName = String(foreground.process ?? '')
+        const changed = Boolean(inst.life.lastForegroundTitle && title !== inst.life.lastForegroundTitle)
+        inst.life.lastForegroundTitle = title
+        inst.life.lastForegroundProcess = processName
+        if (!inst.life.foregroundSince || changed) inst.life.foregroundSince = now
+        if (changed) inst.life.pendingAppChangeAt = now
+      }
+    }
+
+    const before = inst.life.attention
+    const attention = deriveLifeAttention(inst.life, cfg, now)
+    inst.life.previousAttention = before
+    inst.life.attention = attention
+    inst.life.audience = deriveAudience(inst.life, cfg, attention, now)
+    updateLifeNeeds(inst.life, cfg, attention, now, false)
+    const dayKey = lifeDayKey(now)
+    if (inst.life.dailyKey !== dayKey) {
+      inst.life.dailyKey = dayKey
+      inst.life.dailyShare = 0
+      inst.life.dailyImportant = 0
+    }
+    const will = lifeWillingness(inst)
+    inst.life.willingness = will.state
+    pushLifeStatus(state, inst)
+
+    const candidates = []
+    if (before === 'away' && attention !== 'away') {
+      candidates.push({
+        code: 'return-after-absence',
+        importance: 'share',
+        score: 0.95,
+        detail: `离开约 ${Math.round((now - Number(inst.life.lastUserActivityAt || now)) / 60_000)} 分钟后回来`,
+      })
+    }
+    if (attention === 'focused' && inst.life.lastForegroundTitle && inst.life.focusFiredFor !== inst.life.lastForegroundTitle) {
+      candidates.push({
+        code: 'focus-milestone',
+        importance: 'share',
+        score: 0.78,
+        detail: `已专注 ${Math.round((now - inst.life.foregroundSince) / 60_000)} 分钟：${inst.life.lastForegroundTitle}`,
+      })
+    }
+    if (inst.life.pendingAppChangeAt && now - inst.life.pendingAppChangeAt < 30_000) {
+      candidates.push({
+        code: 'app-change',
+        importance: 'none',
+        score: 0.3,
+        detail: `切换到：${inst.life.lastForegroundTitle || '未知窗口'}`,
+      })
+      inst.life.pendingAppChangeAt = 0
+    }
+    if (inst.life.lastAgentFinishAt > Math.max(inst.life.lastEventAt, 0) && now - inst.life.lastAgentFinishAt < 45_000) {
+      candidates.push({ code: 'agent-finished', importance: 'share', score: 0.42, detail: '刚完成一轮对话' })
+    }
+    if (
+      now - Number(inst.life.lastModelInteractionAt ?? now) >= 30 * 60 * 1000
+      && Number(inst.life.boredom) >= 0.42
+    ) {
+      candidates.push({ code: 'long-idle', importance: 'none', score: 0.35, detail: '很久没有互动' })
+    }
+
+    const event = candidates.sort((a, b) => b.score - a.score)[0] ?? null
+    if (!event) continue
+    events.push({ instanceId: inst.id, ...event, at: now })
+    inst.life.lastEventAt = now
+    inst.life.lastEvent = event.code
+    if (event.code === 'focus-milestone') inst.life.focusFiredFor = inst.life.lastForegroundTitle
+
+    const reaction = await performLifeReaction(state, inst, event, log, deps, now)
+    if (reaction) reactions.push({ instanceId: inst.id, event: event.code, ...reaction })
+
+    const canSpeakEvent = event.code === 'return-after-absence' || event.code === 'focus-milestone'
+    const quota = lifeSpeakQuota(inst, now)
+    const budget = lifeDailyBudget(inst, event.importance === 'important' ? 'important' : 'share', now)
+    const quiet = quietHoursActive(cfg, now)
+    const cooldownReady = now - Number(inst.life.lastVerbalAt ?? 0) >= Math.max(30_000, Number(cfg.eventWakeCooldownMs) || 180_000)
+    const contextAllowed = cfg.screenReadEnabled === true
+      || (cfg.wakeCaptureEnabled === true && cfg.screenCaptureEnabled === true)
+    const agentRunning = deps.agentRunning ? deps.agentRunning(inst) : agentIsRunning(state.ctx, cfg.sessionId)
+    const willingToSpeak = will.speak || event.importance === 'important'
+    const plan = canSpeakEvent && willingToSpeak && cfg.eventWakeEnabled === true && !quiet && contextAllowed && !agentRunning
+      && quota.ok && budget.ok && cooldownReady
+      ? wakePlan(inst, 'wake-event', now)
+      : { ok: false, code: 'event-disabled' }
+    if (!plan.ok || !canControl(inst, 'wake', { source: 'wake-event' })) {
+      inst.life.lastDecision = {
+        at: now,
+        event: event.code,
+        speak: false,
+        reason: !canSpeakEvent
+          ? 'nonverbal-only'
+          : !willingToSpeak
+            ? `willingness-${will.state}`
+            : quiet
+              ? 'quiet-hours'
+              : !contextAllowed
+                ? 'no-context-permission'
+                : agentRunning
+                  ? 'agent-running'
+              : !budget.ok
+                ? `${event.importance}-budget`
+                : !quota.ok
+                  ? 'event-quota'
+                  : !cooldownReady ? 'event-cooldown' : plan.code,
+      }
+      continue
+    }
+
+    inst.life.lastVerbalAt = now
+    inst.life.verbalTimes = [...(inst.life.verbalTimes ?? []).filter((t) => t > now - 60 * 60 * 1000), now]
+    inst.life.proactiveSinceUser = Number(inst.life.proactiveSinceUser ?? 0) + 1
+    if (event.importance === 'important') inst.life.dailyImportant += 1
+    else inst.life.dailyShare += 1
+    inst.life.lastDecision = { at: now, event: event.code, speak: true, score: event.score }
+    verbal.push({ instanceId: inst.id, code: event.code })
+    const wakeTask = deps.wakeEvent
+      ? deps.wakeEvent(inst, event)
+      : wakeUp(state, inst, 'wake-event', log, { reason: event })
+    Promise.resolve(wakeTask).catch((error) => {
+      logged(log, `live2d: [${inst.id}] 事件唤醒失败（已兜住）：${errorText(error)}`)
+    })
+  }
+
+  return { events, reactions, verbal }
+}
+
+export function startLifeLoop(state, log, registerCleanup = () => {}) {
+  restoreLifeState(state)
+  let lastSaveAt = 0
+  const tick = async () => {
+    if (state.disposed) return
+    try {
+      const queryTarget = (state.instances ?? []).find((inst) => inst.window?.ready === true && inst.config?.enabled !== false)
+      if (queryTarget) state.windows?.send?.({ type: 'query-idle' }, queryTarget.id)
+      await lifeTick(state, log)
+      if (Date.now() - lastSaveAt >= 60_000) {
+        lastSaveAt = Date.now()
+        const saved = saveLifeState(state)
+        if (!saved.ok) logged(log, `live2d: 陪伴状态写盘失败：${saved.error}`)
+      }
+    } catch (error) {
+      logged(log, `live2d: 陪伴循环出错（已忽略）：${errorText(error)}`)
+    }
+  }
+  const timer = setInterval(tick, 5000)
+  if (typeof timer.unref === 'function') timer.unref()
+  registerCleanup(() => {
+    clearInterval(timer)
+    saveLifeState(state)
+  })
+  log?.info?.('live2d: 陪伴行为循环已启动（事件驱动，每 5s 评估）')
+  return timer
+}
+
 // --- 自动模式预设交互（用户在窗口里点模型/摸头；不算 AI 主动控制） ---
 const PRESET_COOLDOWN_MS = 1200
 const PRESET_ACTIONS = {
+  hair: ['surprised', 'tilt', 'happy'],
+  face: ['shy', 'happy', 'nod'],
+  hand: ['nod', 'happy', 'tilt'],
   head: ['happy', 'tilt', 'nod'],
   body: ['nod', 'shake', 'surprised'],
 }
 
-export function handlePresetTap(state, inst, zone, log = null) {
+function boundsOf(inst) {
+  const b = inst?.windowBounds
+  if (b && Number.isFinite(b.x) && Number.isFinite(b.y)) return b
+  const cfg = inst?.config ?? {}
+  return {
+    x: Number(cfg.windowX) || 0,
+    y: Number(cfg.windowY) || 0,
+    width: Number(cfg.windowWidth) || 320,
+    height: Number(cfg.windowHeight) || 420,
+  }
+}
+
+function peerReaction(root, inst, zone, gesture, now = Date.now()) {
+  if (inst?.config?.dualRelationEnabled === false) return null
+  const peer = (root?.instances ?? []).find((item) =>
+    item.id !== inst.id && item.config?.enabled !== false && item.window?.ready === true && item.window?.dragging !== true,
+  )
+  if (!peer || peer.config?.dualRelationEnabled === false) return null
+  if (now - Number(peer.preset?.lastPeerAt ?? 0) < 2200) return null
+  const recent = (inst.preset?.recentTaps ?? []).filter((at) => now - Number(at) < 8000)
+  let action = 'tilt'
+  if (gesture === 'double') action = 'surprised'
+  else if (gesture === 'pat') action = 'happy'
+  else if (recent.length >= 4) action = 'angry'
+  else if (zone === 'face') action = 'shy'
+  const source = boundsOf(inst)
+  const targetBounds = boundsOf(peer)
+  const target = {
+    x: source.x + source.width / 2 - targetBounds.x,
+    y: source.y + source.height * 0.22 - targetBounds.y,
+  }
+  let sentLook = null
+  let sentAnim = null
+  try {
+    const view = instanceView(root, peer)
+    sentLook = view.windows.send({ type: 'look-at', mode: 'peer', target, durationMs: 2600 })
+    sentAnim = view.windows.send({ type: 'anim', action, timeoutMs: 2600 })
+  } catch { /* 对端窗口可能刚好关闭 */ }
+  peer.preset = { ...(peer.preset ?? {}), lastPeerAt: now, peerAction: action }
+  inst.life = {
+    ...(inst.life ?? createLifeRuntime({}, now)),
+    peerAffinity: Math.min(1, Number(inst.life?.peerAffinity ?? 0.2) + 0.03),
+    lastPeerInteractionAt: now,
+  }
+  peer.life = {
+    ...(peer.life ?? createLifeRuntime({}, now)),
+    peerAffinity: Math.min(1, Number(peer.life?.peerAffinity ?? 0.2) + 0.015),
+    lastPeerInteractionAt: now,
+  }
+  return { peerId: peer.id, action, sentLook, sentAnim }
+}
+
+export function handlePresetTap(state, inst, zone, log = null, gesture = 'tap') {
   if (!inst) return { ok: false, code: 'no-instance' }
   if (inst.config?.autoInteract !== true) {
     return { ok: false, code: 'preset-disabled', error: '预设交互已关闭（设置页「点模型有反应」）' }
@@ -4792,17 +6770,33 @@ export function handlePresetTap(state, inst, zone, log = null) {
   if (now - lastAt < PRESET_COOLDOWN_MS) {
     return { ok: false, code: 'preset-cooldown', retryAfterMs: PRESET_COOLDOWN_MS - (now - lastAt) }
   }
+  const nowTap = Date.now()
+  const recentTaps = [...(inst.preset?.recentTaps ?? []), nowTap].filter((at) => nowTap - Number(at) < 10000)
+  // 10 秒内连续三次摸头，即使都是单击也按“连续摸头”处理。
+  const effectiveGesture = zone === 'hair' && recentTaps.length >= 3 ? 'pat' : gesture
   const pool = PRESET_ACTIONS[zone] ?? PRESET_ACTIONS.body
   const count = inst.preset?.count ?? 0
-  const action = pool[count % pool.length]
-  inst.preset = { ...(inst.preset ?? {}), lastAt: now, action, zone, count: count + 1 }
+  let action = pool[count % pool.length]
+  if (effectiveGesture === 'double') action = 'happy'
+  else if (effectiveGesture === 'long') action = zone === 'hair' || zone === 'face' ? 'shy' : 'tilt'
+  else if (effectiveGesture === 'pat') action = zone === 'hair' ? 'happy' : 'shy'
+  inst.preset = {
+    ...(inst.preset ?? {}),
+    lastAt: now,
+    action,
+    zone,
+    gesture: effectiveGesture,
+    count: count + 1,
+    recentTaps,
+  }
   let sent = null
   try {
     sent = instanceView(state, inst).windows.send({ type: 'anim', action, timeoutMs: 2600 })
   } catch (error) {
     logged(log, `live2d: 预设动作下发失败（${inst.id}）：${errorText(error)}`)
   }
-  return { ok: sent?.ok !== false, action, zone, sent }
+  const peer = peerReaction(state, inst, zone, effectiveGesture, nowTap)
+  return { ok: sent?.ok !== false, action, zone, gesture: effectiveGesture, sent, peer }
 }
 
 /**
@@ -4813,12 +6807,17 @@ export function playPreset(root, inst, action, log = null) {
   if (!inst) return { ok: false, code: 'no-instance' }
   const requested = String(action ?? '').trim().toLowerCase()
   const normalized = ANIM_ALIASES[requested] || requested
-  const custom = (inst.config?.customActions ?? []).find((item) => item.id === normalized)
+  // 0.3.2：自定义动作来自「模型档案」；没有档案时退回实例字段（兼容尚未迁移的旧配置）
+  const profile = profileFor(root, inst)
+  const customs = profile ? profile.customActions : (inst.config?.customActions ?? [])
+  // 0.4.0/0.5.0：右键菜单里也有「按模型能力生成」的默认动作与表情/换装，必须一起认
+  const generated = profile ? [...(profile.autoActions ?? []), ...(profile.capabilityActions ?? [])] : []
+  const custom = [...customs, ...generated].find((item) => item.id === normalized)
   if (!ANIM_WHITELIST.includes(normalized) && !custom) {
     return {
       ok: false,
       code: 'unknown-action',
-      allowed: [...ANIM_WHITELIST, ...(inst.config?.customActions ?? []).map((item) => item.id)],
+      allowed: [...ANIM_WHITELIST, ...customs.map((item) => item.id), ...generated.map((item) => item.id)],
     }
   }
   const timeoutMs = Math.max(inst.config?.animTimeoutMs ?? 2000, custom?.durationMs ?? 0, 4000)
@@ -4840,8 +6839,29 @@ export function playPreset(root, inst, action, log = null) {
 
 function pushPresetsToWindow(root, inst) {
   try {
-    instanceView(root, inst).windows.send({ type: 'config', patch: { presets: buildPresets(inst) } })
+    instanceView(root, inst).windows.send({ type: 'config', patch: { presets: buildPresets(inst, profileFor(root, inst)) } })
   } catch { /* 窗口没开就算了 */ }
+}
+
+/** 独立模型窗口 -> DSH 网页半边的一次性 UI 指令。 */
+export function queueUiCommand(state, type, payload = {}) {
+  const root = state?.root ?? state
+  if (!root || !type) return { ok: false, error: '缺少 state 或 type' }
+  root.ui = {
+    ...(root.ui ?? {}),
+    pending: { type, payload: { ...payload }, at: Date.now() },
+  }
+  return { ok: true, command: root.ui.pending }
+}
+
+/** 网页半边领取后立即清空，避免多个 UI/刷新重复打开设置。 */
+export function takeUiCommand(state, now = Date.now(), ttlMs = 15000) {
+  const root = state?.root ?? state
+  const pending = root?.ui?.pending
+  if (!pending) return null
+  root.ui.pending = null
+  if (!Number.isFinite(Number(pending.at)) || now - Number(pending.at) > ttlMs) return null
+  return { type: pending.type, ...(pending.payload ?? {}), at: pending.at }
 }
 
 export function stopPresetSequence(root, inst) {
@@ -4855,8 +6875,12 @@ export function stopPresetSequence(root, inst) {
 
 export function startPresetSequence(root, inst, sequenceId, log = null, options = {}) {
   if (!inst) return { ok: false, code: 'no-instance' }
-  const seq = (inst.config?.presetSequences ?? []).find((item) => item.id === sequenceId)
-  if (!seq) return { ok: false, code: 'no-such-sequence', available: (inst.config?.presetSequences ?? []).map((i) => i.id) }
+  // 0.3.2：循环来自「模型档案」，启动时由当前实例发起（不再有 targets）
+  // 没有档案时退回实例字段（兼容尚未迁移的旧配置）
+  const profile = profileFor(root, inst)
+  const sequences = profile ? profile.presetSequences : (inst.config?.presetSequences ?? [])
+  const seq = sequences.find((item) => item.id === sequenceId)
+  if (!seq) return { ok: false, code: 'no-such-sequence', available: sequences.map((i) => i.id) }
   if (!Array.isArray(seq.steps) || seq.steps.length === 0) {
     return { ok: false, code: 'empty-sequence', error: `循环「${seq.label || seq.id}」没有动作步骤，先勾选动作再保存` }
   }
@@ -4912,13 +6936,35 @@ export function startPresetLoop(state, log, registerCleanup = () => {}) {
       if (now - preset.idleAt < gap) continue
       // 刚被点过/刚有对话动作时不抢戏
       if (now - (preset.lastAt ?? 0) < 6000) continue
-      const action = ['blink', 'tilt', 'nod'][Math.floor(Math.random() * 3)]
+      // P1「允许不想」：疲惫时只保留很轻的眨眼并拉长间隔；彻底不想动时连空闲动作也停。
+      const will = inst.config?.lifeEnabled !== false && inst.life ? lifeWillingness(inst) : null
+      if (will?.state === 'withdrawn') {
+        inst.preset = {
+          ...preset,
+          idleAt: now,
+          idleGap: 60000 + Math.floor(Math.random() * 30000),
+          idleSuppressed: 'withdrawn',
+        }
+        continue
+      }
+      if (inst.config?.audienceAwareEnabled !== false && inst.life?.audience === 'absent') {
+        inst.preset = {
+          ...preset,
+          idleAt: now,
+          idleGap: 60000 + Math.floor(Math.random() * 30000),
+          idleSuppressed: 'no-audience',
+        }
+        continue
+      }
+      const tired = will?.state === 'tired' || (inst.config?.audienceAwareEnabled !== false && inst.life?.audience === 'ambient')
+      const action = tired ? 'blink' : ['blink', 'tilt', 'nod'][Math.floor(Math.random() * 3)]
       inst.preset = {
         ...preset,
         idleAt: now,
-        idleGap: 20000 + Math.floor(Math.random() * 20000),
+        idleGap: (tired ? 45000 : 20000) + Math.floor(Math.random() * 20000),
         idleAction: action,
         idleCount: (preset.idleCount ?? 0) + 1,
+        idleSuppressed: null,
       }
       try {
         instanceView(state, inst).windows.send({ type: 'anim', action, timeoutMs: 2000 })
@@ -5013,6 +7059,10 @@ function registerRoutes(ctx, state, log, eventLog, windows) {
           await handleInject(ctx, view, log, req, res)
           return
         }
+        if (url.pathname === '/live2d/ui-command' && req.method === 'GET') {
+          jsonResponse(res, 200, { ok: true, command: takeUiCommand(state) })
+          return
+        }
 
         // --- 阶段 1：配置 / 模型 / 气泡 ---
         if (url.pathname === '/live2d/config' && req.method === 'GET') {
@@ -5051,7 +7101,13 @@ function registerRoutes(ctx, state, log, eventLog, windows) {
           // 整表替换（新增/删除一批实例）：也要过唯一性校验
           if (Array.isArray(patch.instances)) {
             const before = state.config
-            const normalized = normalizeConfig({ ...before, ...patch })
+            // 0.3.2：动作/循环属于「模型档案」，整表保存时剥掉实例上的这两个字段，
+            // 避免旧的设置页草稿把动作又写回实例（与档案并存会造成两套数据源）。
+            const cleanInstances = patch.instances.map((item) => {
+              const { customActions, presetSequences, ...rest } = item ?? {}
+              return rest
+            })
+            const normalized = normalizeConfig({ ...before, ...patch, instances: cleanInstances })
             const check = validateInstances(normalized.config)
             if (!check.ok) {
               setWarningSource(state, 'config', [...normalized.warnings, check.error])
@@ -5093,7 +7149,12 @@ function registerRoutes(ctx, state, log, eventLog, windows) {
           }
 
           const viewAfter = target ? instanceView(state, target) : view
-          const configSent = viewAfter.windows?.send?.({ type: 'config', patch: windowConfigPayload(after), title: instanceTitle(state, target), sessionId: after.sessionId || null })
+          const configSent = viewAfter.windows?.send?.({
+            type: 'config',
+            patch: windowConfigPayload(after, buildPresets(target, profileFor(state, target)), lifeStatusSnapshot(target)),
+            title: instanceTitle(state, target),
+            sessionId: after.sessionId || null,
+          })
           const reloadSent = needsReload ? viewAfter.windows?.send?.({ type: 'reload', model: initPayload(viewAfter).model }) : null
           const saved = writeConfigFile(state.config, state.configFile ?? CONFIG_FILE)
           if (!saved.ok) pushRuntimeWarning(state, `配置写盘失败：${saved.error}（本次已生效，但重启后会丢）`)
@@ -5168,7 +7229,7 @@ function registerRoutes(ctx, state, log, eventLog, windows) {
             jsonResponse(res, result.ok ? 200 : 400, { ...result, instanceId: owner.id })
             return
           }
-          if (op === 'start' || op === 'preview') {
+          if (op === 'start' || (op === 'preview' && body.sequenceId)) {
             const result = startPresetSequence(state, owner, String(body.sequenceId || ''), log, { once: op === 'preview' })
             jsonResponse(res, result.ok ? 200 : 400, { ...result, instanceId: owner.id, preview: op === 'preview' })
             return
@@ -5178,7 +7239,7 @@ function registerRoutes(ctx, state, log, eventLog, windows) {
             return
           }
           if (op === 'list') {
-            jsonResponse(res, 200, { ok: true, instanceId: owner.id, presets: buildPresets(owner), running: owner.presetRun?.id ?? null })
+            jsonResponse(res, 200, { ok: true, instanceId: owner.id, presets: buildPresets(owner, profileFor(state, owner)), running: owner.presetRun?.id ?? null })
             return
           }
           if (op === 'design') {
@@ -5194,7 +7255,7 @@ function registerRoutes(ctx, state, log, eventLog, windows) {
             })
             return
           }
-          if (op === 'preview') {
+          if (op === 'preview' && !body.sequenceId) {
             // 预览未保存的草稿：直接把关键帧塞给窗口播一遍
             const draft = body.draft ?? {}
             const tracks = Array.isArray(draft.tracks) ? draft.tracks : []
@@ -5216,7 +7277,7 @@ function registerRoutes(ctx, state, log, eventLog, windows) {
           return
         }
         if (url.pathname === '/live2d/preset' && req.method === 'GET') {
-          jsonResponse(res, 200, { ok: true, presets: buildPresets(view), running: view.presetRun?.id ?? null })
+          jsonResponse(res, 200, { ok: true, presets: buildPresets(view, view.profile ?? null), running: view.presetRun?.id ?? null })
           return
         }
         if (url.pathname === '/live2d/bubble' && (req.method === 'POST' || req.method === 'PUT')) {
@@ -5235,6 +7296,42 @@ function registerRoutes(ctx, state, log, eventLog, windows) {
         }
         if (url.pathname === '/live2d/bubble' && req.method === 'GET') {
           jsonResponse(res, 405, { ok: false, error: '请用 POST，body 形如 { "latest": true } 或 { "text": "..." }' })
+          return
+        }
+        if (url.pathname === '/live2d/memory' && req.method === 'GET') {
+          const wantedId = url.searchParams.get('instanceId')
+          const resolved = wantedId ? resolveInstanceStrict(state, wantedId) : { ok: true, instance: findInstance(state, view.id) }
+          if (!resolved.ok || !resolved.instance) {
+            jsonResponse(res, resolved.status ?? 404, resolved)
+            return
+          }
+          const inst = resolved.instance
+          const sessionId = inst.config?.sessionId ?? ''
+          jsonResponse(res, 200, {
+            ok: true,
+            instanceId: inst.id,
+            sessionId: sessionId || null,
+            enabled: inst.config?.memoryEnabled === true,
+            entries: listMemories(state, sessionId),
+          })
+          return
+        }
+        if (url.pathname === '/live2d/memory' && (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH')) {
+          let body = {}
+          try {
+            body = await readJsonBody(req)
+          } catch (error) {
+            jsonResponse(res, 400, { ok: false, error: `请求体不是合法 JSON：${errorText(error)}` })
+            return
+          }
+          const resolved = body.instanceId ? resolveInstanceStrict(state, body.instanceId) : { ok: true, instance: findInstance(state, view.id) }
+          if (!resolved.ok || !resolved.instance) {
+            jsonResponse(res, resolved.status ?? 404, resolved)
+            return
+          }
+          const inst = resolved.instance
+          const result = memoryMutation(state, inst, inst.config?.sessionId ?? '', String(body.op || ''), body)
+          jsonResponse(res, result.ok ? 200 : (result.code === 'memory-disabled' ? 403 : 400), { ...result, instanceId: inst.id })
           return
         }
         // 阶段 2：窗口内对话（立即返回 accepted，回复走控制通道的 reply 事件）
@@ -5379,6 +7476,156 @@ function registerRoutes(ctx, state, log, eventLog, windows) {
           })
           return
         }
+        // 0.3.2：模型档案（动作/循环按模型共享）
+        if (url.pathname === '/live2d/profiles' && req.method === 'GET') {
+          const profiles = state.config?.modelProfiles ?? {}
+          const bindings = state.config?.modelPathBindings ?? {}
+          const usedPaths = new Map()
+          for (const inst of state.instances ?? []) {
+            const key = normalizeModelKey(inst.config?.modelPath)
+            if (key) usedPaths.set(key, inst.id)
+          }
+          const rows = Object.values(profiles).map((profile) => ({
+            id: profile.id,
+            label: profile.label,
+            pathKey: profile.pathKey,
+            modelEntry: profile.modelEntry,
+            customActions: profile.customActions.length,
+            presetSequences: profile.presetSequences.length,
+            updatedAt: profile.updatedAt,
+            bound: bindings[profile.pathKey] === profile.id,
+            boundInstanceIds: (state.instances ?? [])
+              .filter((inst) => normalizeModelKey(inst.config?.modelPath) === profile.pathKey)
+              .map((inst) => inst.id),
+            inUse: usedPaths.has(profile.pathKey),
+          }))
+          jsonResponse(res, 200, { ok: true, profiles: rows, bindings, limits: { maxProfiles: PROFILE_LIMIT } })
+          return
+        }
+        const profileAction = url.pathname.match(/^\/live2d\/profiles\/([^/]+)(\/rebind|\/auto-actions)?$/)
+        if (profileAction) {
+          const profileId = decodeURIComponent(profileAction[1])
+          const isRebind = profileAction[2] === '/rebind'
+          const isAutoActions = profileAction[2] === '/auto-actions'
+          const current = state.config?.modelProfiles?.[profileId]
+          if (!current) {
+            jsonResponse(res, 404, { ok: false, code: 'no-such-profile', error: `没有模型档案 ${profileId}` })
+            return
+          }
+          if (!isRebind && req.method === 'GET') {
+            jsonResponse(res, 200, {
+              ok: true,
+              profile: current,
+              boundInstanceIds: (state.instances ?? [])
+                .filter((inst) => normalizeModelKey(inst.config?.modelPath) === current.pathKey)
+                .map((inst) => inst.id),
+            })
+            return
+          }
+          if (isAutoActions && (req.method === 'POST' || req.method === 'PUT')) {
+            let body = {}
+            try {
+              body = await readJsonBody(req)
+            } catch {
+              body = {}
+            }
+            const inst = (state.instances ?? []).find((item) => normalizeModelKey(item.config?.modelPath) === current.pathKey)
+            if (!inst) {
+              jsonResponse(res, 400, {
+                ok: false,
+                code: 'no-instance',
+                error: `档案「${current.label}」当前没有实例在用，先把某个模型窗格切到这个模型再生成默认动作`,
+              })
+              return
+            }
+            // force=false 时参数集没变就跳过；默认强制重挑，让用户点一次就见效
+            const result = ensureAutoActions(state, inst, null, { force: body?.force !== false })
+            jsonResponse(res, result.ok ? 200 : 400, result.ok
+              ? {
+                ok: true,
+                profileId,
+                changed: result.changed === true,
+                count: result.count,
+                capabilityCount: result.capabilityCount ?? 0,
+                hash: result.hash,
+                profile: state.config.modelProfiles?.[profileId] ?? null,
+              }
+              : { ok: false, code: result.code, error: `生成默认动作失败：${result.code ?? '未知'}` })
+            return
+          }
+          if (isRebind && (req.method === 'POST' || req.method === 'PUT')) {
+            let body = {}
+            try {
+              body = await readJsonBody(req)
+            } catch (error) {
+              jsonResponse(res, 400, { ok: false, error: `请求体不是合法 JSON：${errorText(error)}` })
+              return
+            }
+            const key = normalizeModelKey(body?.path ?? body?.pathKey)
+            if (!key) {
+              jsonResponse(res, 400, { ok: false, error: '需要 path（模型目录）或 pathKey' })
+              return
+            }
+            const bindings = { ...(state.config.modelPathBindings ?? {}) }
+            // 一个路径只绑一个档案：别的档案如果占着这条路径就先让位
+            for (const [otherKey, otherId] of Object.entries(bindings)) {
+              if (otherId === profileId && otherKey !== key) delete bindings[otherKey]
+            }
+            bindings[key] = profileId
+            state.config.modelPathBindings = normalizeModelPathBindings(bindings, state.config.modelProfiles)
+            const saved = writeConfigFile(state.config, state.configFile ?? CONFIG_FILE)
+            if (!saved.ok) pushRuntimeWarning(state, `配置写盘失败：${saved.error}`)
+            jsonResponse(res, saved.ok ? 200 : 500, { ok: saved.ok, profileId, pathKey: key, bindings: state.config.modelPathBindings, fileError: saved.error ?? null })
+            return
+          }
+          if (req.method === 'PATCH' || req.method === 'PUT') {
+            let body = {}
+            try {
+              body = await readJsonBody(req)
+            } catch (error) {
+              jsonResponse(res, 400, { ok: false, error: `请求体不是合法 JSON：${errorText(error)}` })
+              return
+            }
+            const patch = {}
+            if (typeof body?.label === 'string') patch.label = body.label
+            if (typeof body?.modelEntry === 'string') patch.modelEntry = body.modelEntry
+            if (body?.customActions !== undefined) patch.customActions = body.customActions
+            if (body?.presetSequences !== undefined) patch.presetSequences = body.presetSequences
+            const result = patchProfile(state, profileId, patch)
+            if (!result.ok) {
+              jsonResponse(res, result.status ?? 400, { ok: false, code: result.code, error: `保存模型档案失败：${result.code ?? '未知'}` })
+              return
+            }
+            const saved = writeConfigFile(state.config, state.configFile ?? CONFIG_FILE)
+            if (!saved.ok) pushRuntimeWarning(state, `配置写盘失败：${saved.error}`)
+            // 所有用这个模型的实例都要收到新的动作表
+            for (const inst of state.instances ?? []) {
+              if (normalizeModelKey(inst.config?.modelPath) === result.profile.pathKey) pushPresetsToWindow(state, inst)
+            }
+            jsonResponse(res, saved.ok ? 200 : 500, { ok: saved.ok, profile: result.profile, warnings: result.warnings ?? [], fileError: saved.error ?? null })
+            return
+          }
+          if (req.method === 'DELETE') {
+            const bindings = { ...(state.config.modelPathBindings ?? {}) }
+            const usedBy = (state.instances ?? []).filter((inst) => normalizeModelKey(inst.config?.modelPath) === current.pathKey)
+            const force = url.searchParams.get('force') === '1'
+            if (usedBy.length && !force) {
+              jsonResponse(res, 409, { ok: false, code: 'profile-in-use', error: `档案「${current.label}」正在被 ${usedBy.map((i) => i.id).join(' / ')} 使用，换掉模型或加 ?force=1 再删` })
+              return
+            }
+            for (const [key, id] of Object.entries(bindings)) if (id === profileId) delete bindings[key]
+            const profiles = { ...(state.config.modelProfiles ?? {}) }
+            delete profiles[profileId]
+            state.config.modelProfiles = normalizeModelProfiles(profiles, [])
+            state.config.modelPathBindings = normalizeModelPathBindings(bindings, state.config.modelProfiles)
+            const saved = writeConfigFile(state.config, state.configFile ?? CONFIG_FILE)
+            if (!saved.ok) pushRuntimeWarning(state, `配置写盘失败：${saved.error}`)
+            jsonResponse(res, saved.ok ? 200 : 500, { ok: saved.ok, removed: profileId, fileError: saved.error ?? null })
+            return
+          }
+          jsonResponse(res, 405, { ok: false, error: '只支持 PATCH / DELETE / POST …/rebind / POST …/auto-actions' })
+          return
+        }
         if (url.pathname === '/live2d/instances' && (req.method === 'POST' || req.method === 'PUT')) {
           let body = {}
           try {
@@ -5463,7 +7710,12 @@ function registerRoutes(ctx, state, log, eventLog, windows) {
           const saved = writeConfigFile(state.config, state.configFile ?? CONFIG_FILE)
           if (!saved.ok) pushRuntimeWarning(state, `配置写盘失败：${saved.error}（本次已生效，但重启后会丢）`)
           const viewAfter = target ? instanceView(state, target) : null
-          const sentConfig = viewAfter?.windows?.send?.({ type: 'config', patch: windowConfigPayload(target.config), title: instanceTitle(state, target), sessionId: target.config.sessionId || null })
+          const sentConfig = viewAfter?.windows?.send?.({
+            type: 'config',
+            patch: windowConfigPayload(target.config, buildPresets(target, profileFor(state, target)), lifeStatusSnapshot(target)),
+            title: instanceTitle(state, target),
+            sessionId: target.config.sessionId || null,
+          })
           const sentReload = needsReload ? viewAfter?.windows?.send?.({ type: 'reload', model: initPayload(viewAfter).model }) : null
           jsonResponse(res, saved.ok ? 200 : 500, {
             ok: saved.ok,
@@ -5512,7 +7764,19 @@ function registerRoutes(ctx, state, log, eventLog, windows) {
             return
           }
           if (action === 'close') {
-            const result = closeInstanceWindow(state, targetId)
+            const target = findInstance(state, targetId)
+            const farewell = sendFarewell(state, target, 'window-close')
+            const isolated = state.configFile && state.configFile !== CONFIG_FILE
+            let result = null
+            if (farewell.ok && !isolated) {
+              const timer = setTimeout(() => {
+                try { closeInstanceWindow(state, targetId) } catch { /* 已关闭 */ }
+              }, 1400)
+              if (typeof timer.unref === 'function') timer.unref()
+              result = { ok: true, instanceId: targetId, deferred: true, farewell }
+            } else {
+              result = { ...closeInstanceWindow(state, targetId), farewell }
+            }
             jsonResponse(res, 200, result)
             return
           }
@@ -5615,6 +7879,22 @@ export function createLive2dTools(state, log) {
         bubblePx: inst.renderer?.layout?.bubblePx ?? null,
         bubbleFixedSize: inst.config?.bubbleFixedSize === true,
         screen: inst.screen?.watch ?? null,
+        life: inst.life
+          ? {
+              attention: inst.life.attention,
+              audience: inst.life.audience,
+              willingness: inst.life.willingness,
+              energy: Math.round(Number(inst.life.energy) * 100) / 100,
+              mood: Math.round(Number(inst.life.mood) * 100) / 100,
+              boredom: Math.round(Number(inst.life.boredom) * 100) / 100,
+              lastEvent: inst.life.lastEvent,
+              peerAffinity: Math.round(Number(inst.life.peerAffinity) * 100) / 100,
+            }
+          : null,
+        memory: {
+          enabled: inst.config?.memoryEnabled === true,
+          count: listMemories(state, inst.config?.sessionId ?? '').filter((item) => !item.dormant).length,
+        },
       }))
       const wanted = typeof args?.instanceId === 'string' ? args.instanceId : ''
       const list = wanted ? rows.filter((row) => row.instanceId === wanted) : rows
@@ -5682,6 +7962,102 @@ export function createLive2dTools(state, log) {
     },
   }
 
+  const toolPerform = {
+    name: 'live2d_perform',
+    description: '一次性完成一小段有身体感的回应：先看某个方向，再播放动作，延迟后显示气泡（可选自动朗读）。需要把语言、表情和动作连贯表达时优先用这个工具，而不是连续调用多个工具。',
+    parameters: {
+      type: 'object',
+      properties: {
+        instanceId: { type: 'string', description: '可选，指定实例' },
+        lookAt: { type: 'string', enum: ['cursor', 'user', 'away', 'none'], description: '看向鼠标、看向用户、看向别处或取消强制视线' },
+        anim: { type: 'string', description: `动作 id：${ANIM_WHITELIST.join(' | ')}，也可用当前实例的自定义动作` },
+        text: { type: 'string', description: '气泡文本；留空则只做视线/动作' },
+        delayMs: { type: 'number', description: '动作开始后延迟多久显示气泡，0~3000ms，默认 350ms' },
+      },
+      additionalProperties: false,
+    },
+    output: { schema: { type: 'object', properties: { ok: { type: 'boolean' }, summary: { type: 'string' } }, required: ['ok', 'summary'], additionalProperties: false }, render: (_args, value) => [{ type: 'text', text: value?.summary ?? '' }] },
+    async execute(args, exec) {
+      const sessionId = exec?.agent?.session?.id ?? null
+      const target = resolveToolTarget(state, { instanceId: args?.instanceId, sessionId })
+      if (!target.ok) return fail(target.code, target.message, { available: target.available })
+      const inst = target.inst
+      const view = instanceView(state, inst)
+      const text = typeof args?.text === 'string' ? args.text.trim() : ''
+      const anim = typeof args?.anim === 'string' ? args.anim.trim().toLowerCase() : ''
+      const lookAt = ['cursor', 'user', 'away', 'none'].includes(args?.lookAt) ? args.lookAt : null
+      if (!text && !anim && !lookAt) return fail('empty-plan', 'live2d_perform 至少需要 lookAt / anim / text 之一')
+      if (!canControl(inst, 'bubble', { source: 'tool' }) && text) {
+        const denied = modeForbidden(inst, 'bubble')
+        return fail(denied.code, denied.error, { instanceId: inst.id })
+      }
+      if (!canControl(inst, 'anim', { source: 'tool' }) && (anim || lookAt)) {
+        const denied = modeForbidden(inst, 'anim')
+        return fail(denied.code, denied.error, { instanceId: inst.id })
+      }
+
+      let look = null
+      if (lookAt) {
+        look = view.windows.send({ type: 'look-at', mode: lookAt, durationMs: 5000 })
+        if (look?.ok === false) return fail('look-failed', `视线指令没送到窗口：${look.error ?? 'unknown'}`, { instanceId: inst.id, look })
+      }
+
+      let animation = null
+      if (anim) {
+        const result = handleAnim(view, log, { action: anim })
+        animation = result.payload ?? { status: result.status }
+        if (result.status !== 200) {
+          return fail(animation.code ?? 'anim-failed', animation.error ?? `动作失败（${result.status}）`, { instanceId: inst.id, animation, look })
+        }
+      }
+
+      let bubble = null
+      if (text) {
+        const delayMs = clampInt(Math.round(Number(args?.delayMs ?? 350)), { min: 0, max: 3000, fallback: 350 }, 'delayMs', [])
+        if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+        const shown = displayBubbleText(text, 2000)
+        const key = replyKeyOf(null, text)
+        if (!claimReply(inst, key)) {
+          bubble = { ok: true, shown: false, deduped: true }
+        } else {
+          const seq = (inst.bubble.seq += 1)
+          const speechOn = inst.config.ttsEnabled === true && inst.config.ttsAutoSpeak === true
+          const sent = view.windows.send({
+            type: 'bubble',
+            text: shown,
+            format: 'markdown',
+            seq,
+            durationMs: speechOn ? 0 : inst.config.bubbleDurationMs,
+            speechPending: speechOn,
+          })
+          if (sent?.ok === false) {
+            if (inst.bubble) inst.bubble.claim = null
+            return fail('bubble-failed', `气泡没能送到窗口：${sent.error ?? 'unknown'}`, { instanceId: inst.id, sent })
+          }
+          inst.bubble.lastMessageId = key
+          inst.bubble.lastIdentity = textIdentity(shown)
+          inst.bubble.lastAt = Date.now()
+          inst.bubble.bubbleCount = (inst.bubble.bubbleCount ?? 0) + 1
+          bubble = { ok: true, shown: true, seq }
+          if (speechOn) {
+            speakForReply(state, inst, seq, ttsText(text, 1_000_000), log)
+              .catch((error) => logged(log, `[${inst.id}] 表演语音异常：${errorText(error)}`))
+          }
+        }
+      }
+      return {
+        ok: true,
+        summary: toolSummary({
+          instanceId: inst.id,
+          resolvedBy: target.resolvedBy,
+          lookAt: lookAt ?? null,
+          anim: anim || null,
+          bubble: bubble ? { shown: bubble.shown === true, seq: bubble.seq ?? null, deduped: bubble.deduped === true } : null,
+        }),
+      }
+    },
+  }
+
   const toolAnim = {
     name: 'live2d_anim',
     description: `让 Live2D 桌宠做一个动作。可用动作：${ANIM_WHITELIST.join(' / ')}。手动/半自动模式可用，带 3 秒冷却。`,
@@ -5708,17 +8084,18 @@ export function createLive2dTools(state, log) {
 
   const toolWindow = {
     name: 'live2d_window',
-    description: '管理 Live2D 桌宠窗口：打开/重载；手动模式下还能移动、改大小、按比例缩放、复位。（AI 不能关闭窗口，关闭请用户点 × 或走设置页。）',
+    description: '管理 Live2D 桌宠窗口：打开/重载；AI 自动模式下还能移动、改大小、按比例缩放、复位，以及安全地坐到任务栏、靠屏幕边缘或短时跟随鼠标。（AI 不能关闭窗口。）',
     parameters: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['open', 'reload', 'move', 'resize', 'scale', 'reset'] },
+        action: { type: 'string', enum: ['open', 'reload', 'move', 'resize', 'scale', 'reset', 'presence'] },
         instanceId: { type: 'string', description: '可选，指定实例' },
         x: { type: 'number', description: 'move：目标左上角 x（会夹在工作区内）' },
         y: { type: 'number', description: 'move：目标左上角 y' },
         width: { type: 'number', description: 'resize：宽 160~800' },
         height: { type: 'number', description: 'resize：高 200~1000' },
         scalePct: { type: 'number', description: 'scale：相对当前尺寸的百分比 50~200' },
+        position: { type: 'string', enum: ['home', 'taskbar', 'edge-left', 'edge-right', 'follow-cursor', 'stop'], description: 'presence：语义化位置；follow-cursor 会保持距离跟随鼠标直到 stop/用户拖动' },
       },
       required: ['action'],
       additionalProperties: false,
@@ -5763,7 +8140,25 @@ export function createLive2dTools(state, log) {
           }
           return { ok: true, summary: toolSummary({ action, instanceId: target.inst.id, window: target.inst.window?.state ?? 'unknown', sent }) }
         }
+        if (action === 'presence') {
+          const position = String(args?.position || '')
+          if (!['home', 'taskbar', 'edge-left', 'edge-right', 'follow-cursor', 'stop'].includes(position)) {
+            return fail('bad-action', 'presence 需要 position：home / taskbar / edge-left / edge-right / follow-cursor / stop')
+          }
+          const before = target.inst.windowBounds?.at ?? 0
+          const sent = view.windows.send({ type: 'presence', position, durationMs: 850 })
+          if (sent?.ok === false) return fail('window-failed', `窗口命令没送出去：${sent.error || '未知原因'}`, { instanceId: target.inst.id, sent })
+          const landed = await waitForBounds(target.inst, before, 3200)
+          if (!landed) return fail('window-timeout', '窗口没有在 3.2 秒内回报新位置', { instanceId: target.inst.id })
+          if (position !== 'follow-cursor' && position !== 'stop') {
+            patchInstance(state, target.inst.id, {
+              windowX: landed.x, windowY: landed.y, windowWidth: landed.width, windowHeight: landed.height,
+            })
+          }
+          return { ok: true, summary: toolSummary({ action, position, instanceId: target.inst.id, bounds: landed }) }
+        }
         if (action === 'move' || action === 'resize' || action === 'scale' || action === 'reset') {
+          view.windows.send({ type: 'presence', position: 'stop' }, target.inst.id)
           const bounds = {}
           if (action === 'move') {
             if (!Number.isFinite(Number(args?.x)) || !Number.isFinite(Number(args?.y))) {
@@ -5901,13 +8296,25 @@ export function createLive2dTools(state, log) {
       const op = String(args?.op || '')
 
       if (op === 'list') {
+        // 0.3.2：自定义动作/循环来自模型档案
+        const profile = profileFor(state, inst)
+        const customIds = new Set((profile?.customActions ?? []).map((item) => item.id))
         return {
           ok: true,
           summary: toolSummary({
             instanceId: inst.id,
+            profileId: profile?.id ?? null,
+            profileLabel: profile?.label ?? null,
+            // 内置动作仍可被内部事件/AI 调用，但菜单已不再按大肥鱼皮套展示。
             builtin: ANIM_WHITELIST.map((id) => ({ id, label: BUILTIN_ACTION_LABELS[id] ?? id })),
-            custom: (inst.config.customActions ?? []).map((item) => ({ id: item.id, label: item.label, tracks: item.tracks.length })),
-            sequences: inst.config.presetSequences ?? [],
+            defaultActions: (profile?.autoActions ?? [])
+              .filter((item) => !customIds.has(item.id))
+              .map((item) => ({ id: item.id, label: item.label, durationMs: item.durationMs, tracks: item.tracks })),
+            capabilityActions: (profile?.capabilityActions ?? [])
+              .filter((item) => !customIds.has(item.id))
+              .map((item) => ({ id: item.id, label: item.label, group: item.group ?? '', hold: item.hold === true, tracks: item.tracks })),
+            custom: (profile?.customActions ?? []).map((item) => ({ id: item.id, label: item.label, tracks: item.tracks.length })),
+            sequences: profile?.presetSequences ?? [],
             running: inst.presetRun?.id ?? null,
             modelParams: inst.renderer?.params?.params ?? null,
           }),
@@ -5937,21 +8344,22 @@ export function createLive2dTools(state, log) {
           warnings,
         )[0]
         if (!def) return fail('bad-action', warnings[0] ?? '动作定义不合法', { warnings, id: wantedId })
-        const others = (inst.config.customActions ?? []).filter((item) => item.id !== def.id)
-        const result = patchInstance(state, inst.id, { customActions: [...others, def] })
-        if (!result?.ok) return fail(result?.code || 'define-failed', result?.error ?? '保存失败')
-        pushPresetsToWindow(state, inst)
-        return { ok: true, summary: toolSummary({ defined: def.id, label: def.label, tracks: def.tracks.length, warnings }) }
+        const currentProfile = profileFor(state, inst)
+        const others = (currentProfile?.customActions ?? []).filter((item) => item.id !== def.id)
+        const saved = savePresetsToProfile(state, inst, { customActions: [...others, def] }, log)
+        if (!saved.ok) return fail(saved.code || 'define-failed', saved.error ?? '保存失败')
+        return { ok: true, summary: toolSummary({ defined: def.id, label: def.label, tracks: def.tracks.length, warnings: [...warnings, ...saved.warnings] }) }
       }
 
       if (op === 'remove') {
         const id = String(args?.action || '')
         if (!id) return fail('bad-action', '需要 action（要删除的自定义动作 id）')
-        const next = (inst.config.customActions ?? []).filter((item) => item.id !== id)
-        if (next.length === (inst.config.customActions ?? []).length) return fail('no-such-action', `没有自定义动作「${id}」`)
-        const result = patchInstance(state, inst.id, { customActions: next })
-        if (!result?.ok) return fail(result?.code || 'remove-failed', result?.error ?? '保存失败')
-        pushPresetsToWindow(state, inst)
+        const currentProfile = profileFor(state, inst)
+        const list = currentProfile?.customActions ?? []
+        const next = list.filter((item) => item.id !== id)
+        if (next.length === list.length) return fail('no-such-action', `没有自定义动作「${id}」`)
+        const saved = savePresetsToProfile(state, inst, { customActions: next }, log)
+        if (!saved.ok) return fail(saved.code || 'remove-failed', saved.error ?? '保存失败')
         return { ok: true, summary: toolSummary({ removed: id }) }
       }
 
@@ -5963,10 +8371,10 @@ export function createLive2dTools(state, log) {
           warnings,
         )[0]
         if (!seq) return fail('bad-sequence', warnings[0] ?? '循环定义不合法', { warnings })
-        const others = (inst.config.presetSequences ?? []).filter((item) => item.id !== seq.id)
-        const result = patchInstance(state, inst.id, { presetSequences: [...others, seq] })
-        if (!result?.ok) return fail(result?.code || 'sequence-failed', result?.error ?? '保存失败')
-        pushPresetsToWindow(state, inst)
+        const currentProfile = profileFor(state, inst)
+        const others = (currentProfile?.presetSequences ?? []).filter((item) => item.id !== seq.id)
+        const saved = savePresetsToProfile(state, inst, { presetSequences: [...others, seq] }, log)
+        if (!saved.ok) return fail(saved.code || 'sequence-failed', saved.error ?? '保存失败')
         return { ok: true, summary: toolSummary({ sequence: seq.id, steps: seq.steps, intervalMs: seq.intervalMs }) }
       }
 
@@ -6001,7 +8409,21 @@ export function createLive2dTools(state, log) {
       if (!known?.params?.length) {
         return fail('no-params', '还没拿到模型参数表：窗口要先把模型渲染出来（打开窗口/等待渲染完成后重试）')
       }
-      return { ok: true, summary: toolSummary({ instanceId: target.inst.id, count: known.count, at: known.at, params: known.params }) }
+      const profile = profileFor(state, target.inst)
+      const caps = profile?.capabilities ?? null
+      let summary = toolSummary({ instanceId: target.inst.id, count: known.count, at: known.at, params: known.params })
+      if (caps) {
+        const by = (group) => caps.expressions.filter((item) => item.group === group).length
+        const acts = (profile?.capabilityActions ?? []).map((item) => item.label)
+        summary += `\n\n【模型能力】表情 ${by('face')} · 换装 ${by('clothes')} · 手势 ${by('gesture')} · 其它 ${by('other')}`
+        if (acts.length) summary += `\n可做动作（右键菜单）：${acts.join('、')}`
+        if (caps.motions.length) {
+          summary += `\n动画文件（motion3，model3.json 未注册，当前不播）：${caps.motions.map((item) => item.label).join('、')}`
+        }
+      } else {
+        summary += '\n\n【模型能力】还没扫描过：让窗口渲染完成后，设置页点一次「重新生成」即可生成能力清单'
+      }
+      return { ok: true, summary }
     },
   }
 
@@ -6059,6 +8481,70 @@ export function createLive2dTools(state, log) {
     },
   }
 
+  const toolMemory = {
+    name: 'live2d_memory',
+    description:
+      '管理当前对话专用的陪伴记忆。记忆按 sessionId 隔离，切换对话不会串用。' +
+      'remember=记住用户明确要求保留的信息；search/list=检索；update=修正；' +
+      'forget=让它休眠（不会删除，之后用户重新提到时可自动想起）；recall=立刻重新想起；' +
+      'forget-old=把长期未更新的活跃记忆转为休眠。不要存储密码、密钥、验证码等敏感凭据。',
+    parameters: {
+      type: 'object',
+      properties: {
+        instanceId: { type: 'string', description: '可选，指定实例（仍只访问该实例当前绑定会话的记忆）' },
+        op: { type: 'string', enum: ['remember', 'search', 'list', 'update', 'forget', 'recall', 'forget-old'] },
+        id: { type: 'string', description: 'update / forget / recall 使用的记忆 id' },
+        text: { type: 'string', description: '记忆正文（最长 500 字）' },
+        kind: { type: 'string', enum: MEMORY_KINDS, description: '记忆类型' },
+        tags: { type: 'array', items: { type: 'string' }, description: '最多 8 个标签' },
+        importance: { type: 'number', description: '重要度 1~5，默认 3' },
+        query: { type: 'string', description: 'search 的检索词；用户重新提起休眠记忆时会靠它触发“想起来”' },
+        limit: { type: 'number', description: 'search/list 返回条数，默认 8' },
+        olderThanDays: { type: 'number', description: 'forget-old：多少天未更新后休眠，默认 90' },
+      },
+      required: ['op'],
+      additionalProperties: false,
+    },
+    output: { schema: { type: 'object', properties: { ok: { type: 'boolean' }, summary: { type: 'string' } }, required: ['ok', 'summary'], additionalProperties: false }, render: (_args, value) => [{ type: 'text', text: value?.summary ?? '' }] },
+    async execute(args, exec) {
+      const sessionId = exec?.agent?.session?.id ?? null
+      const target = resolveToolTarget(state, { instanceId: args?.instanceId, sessionId })
+      if (!target.ok) return fail(target.code, target.message, { available: target.available })
+      const inst = target.inst
+      if (inst.config?.memoryEnabled !== true) {
+        return fail('memory-disabled', '这个实例的陪伴记忆未启用。请让用户在「设置 → Live2D → 模式设置」打开。')
+      }
+      const memorySession = String(inst.config?.sessionId ?? '')
+      if (!memorySession) return fail('memory-no-session', '这个实例还没绑定会话，记忆无法确定归属。')
+      const op = String(args?.op || '')
+      if (op === 'search') {
+        return {
+          ok: true,
+          summary: toolSummary({
+            op,
+            sessionId: memorySession,
+            entries: searchMemories(state, memorySession, String(args?.query ?? ''), Number(args?.limit) || 8),
+          }),
+        }
+      }
+      if (op === 'list') {
+        const rows = listMemories(state, memorySession)
+        return {
+          ok: true,
+          summary: toolSummary({
+            op,
+            sessionId: memorySession,
+            active: rows.filter((item) => !item.dormant).slice(0, Math.max(1, Math.min(50, Number(args?.limit) || 20))),
+            dormant: rows.filter((item) => item.dormant).slice(0, Math.max(1, Math.min(50, Number(args?.limit) || 20))),
+          }),
+        }
+      }
+      const result = memoryMutation(state, inst, memorySession, op, args)
+      if (!result.ok) return fail(result.code || 'memory-failed', result.error ?? '记忆操作失败')
+      return { ok: true, summary: toolSummary({ op, sessionId: memorySession, ...result }) }
+    },
+  }
+
   // 只读：AI 不能叫醒自己（用户要求），只能看台账
   const toolWake = {
     name: 'live2d_wake',
@@ -6081,7 +8567,9 @@ export function createLive2dTools(state, log) {
         summary: toolSummary({
           instanceId: inst.id,
           mode: inst.config?.mode ?? 'manual',
-          enabled: inst.config?.wakeEnabled === true,
+          wakeDriver: inst.config?.wakeDriver ?? 'off',
+          timerEnabled: inst.config?.wakeEnabled === true,
+          eventEnabled: inst.config?.eventWakeEnabled === true,
           intervalMs: inst.config?.wakeIntervalMs ?? 30_000,
           captureEnabled: inst.config?.wakeCaptureEnabled === true,
           state: inst.wake?.state ?? 'idle',
@@ -6094,7 +8582,7 @@ export function createLive2dTools(state, log) {
     },
   }
 
-  return [toolStatus, toolBubble, toolAnim, toolWindow, toolScreen, toolCapture, toolPreset, toolParams, toolWake]
+  return [toolStatus, toolBubble, toolPerform, toolAnim, toolWindow, toolScreen, toolCapture, toolMemory, toolPreset, toolParams, toolWake]
 }
 
 export function registerLive2dTools(ctx, state, log) {
@@ -6131,6 +8619,10 @@ export function apply(ctx, rawConfig) {
     warnings: [],
     // 窗口「此刻」的真实几何（ready / 拖动松手时更新），供设置页「刷新坐标」读
     windowBounds: null,
+    // P1 生命感：系统级输入空闲时间（由 Electron 窗口进程回报）
+    lifeSystem: { idleSeconds: null, at: 0 },
+    // P2 陪伴记忆：独立于主会话与生命状态，按实例分组
+    memory: emptyMemoryStore(),
     selfTest: null,
     routesRegistered: false,
     eventSubscription: null,
@@ -6183,6 +8675,16 @@ export function apply(ctx, rawConfig) {
       log.warn(`live2d: 配置文件读取失败（已用默认值）：${file.error}`)
     }
     const fileData = file.data ? pickPersisted(file.data) : {}
+    // P2 存量迁移：已有安装可能已经用了别的记忆插件。只有缺失该字段的旧实例默认关闭，
+    // 新建实例/新安装仍使用 DEFAULT_INSTANCE.memoryEnabled=true。
+    for (const item of fileData.instances ?? []) {
+      if (item && typeof item === 'object' && !Object.prototype.hasOwnProperty.call(item, 'memoryEnabled')) {
+        item.memoryEnabled = false
+      }
+    }
+    if (file.exists === true && !Array.isArray(fileData.instances) && !Object.prototype.hasOwnProperty.call(fileData, 'memoryEnabled')) {
+      fileData.memoryEnabled = false
+    }
     // 安全保险（用户要求）：模式不跨重启保留——上次调成「AI 自动/半自动」，
     // 重新加载插件后要回到默认的「手动」（内部键 auto，不主动说话、不自己动）。
     // 只丢弃「从文件读到的」mode；patch 里写死的仍然生效。
@@ -6199,6 +8701,38 @@ export function apply(ctx, rawConfig) {
     state.config = normalized.config
     // 多实例：把 config.instances 展开成运行态实例数组（数组第一个 = 默认实例）
     syncInstances(state)
+    // 0.3.2：模型档案迁移（实例上的动作/循环 → 按模型共享的档案）
+    // 顺序：备份配置 → 计算档案 → 写盘成功 → 才清空实例旧字段（写盘失败就保留双份，绝不先清）
+    try {
+      const isolated = ctx && typeof ctx.__live2dConfigFile === 'string'
+      if (!isolated) {
+        const backupFile = `${state.configFile}.bak-model-profiles-${Date.now()}`
+        try {
+          if (existsSync(state.configFile)) copyFileSync(state.configFile, backupFile)
+        } catch (error) {
+          log.warn(`live2d: 模型档案迁移前备份失败（继续）：${errorText(error)}`)
+        }
+        const migration = migrateModelProfiles(state)
+        if (migration.changed) {
+          const saved = writeConfigFile(state.config, state.configFile ?? CONFIG_FILE)
+          if (saved.ok) {
+            const cleared = clearLegacyInstancePresets(state)
+            if (cleared.length) writeConfigFile(state.config, state.configFile ?? CONFIG_FILE)
+            syncInstances(state)
+            const report = migration.report ?? {}
+            log.warn(
+              `live2d: 模型档案迁移完成（新建 ${report.created?.length ?? 0}、合并 ${report.merged?.length ?? 0}、`
+              + `冲突 ${report.conflicts?.length ?? 0}、清理实例字段 ${cleared.length}）；备份 ${path.basename(backupFile)}`,
+            )
+          } else {
+            log.warn(`live2d: 模型档案迁移未写盘（实例动作保留，不影响启动）：${saved.error}`)
+          }
+        }
+      }
+    } catch (error) {
+      log.warn(`live2d: 模型档案迁移异常（不影响启动）：${errorText(error)}`)
+    }
+    state.memory = loadMemoryStore(state)
     // 0.13.9 一次性迁移：存量 config 里的模式开关默认打开（用户要求「模式设置默认全开」）。
     // 只跑一次并写标记，之后用户在「模式设置」里关掉就保持关闭。
     // 测试会注入 ctx.__live2dConfigFile 隔离配置，那种情况不迁移（否则断言会被默认值污染）。
@@ -6274,10 +8808,26 @@ export function apply(ctx, rawConfig) {
           },
         })
     registerCleanup(() => {
-      try {
-        const closing = state.windows?.close?.()
-        if (closing && typeof closing.catch === 'function') closing.catch(() => {})
-      } catch { /* 关闭失败不影响卸载 */ }
+      const closeNow = () => {
+        try {
+          const closing = state.windows?.close?.()
+          if (closing && typeof closing.catch === 'function') closing.catch(() => {})
+        } catch { /* 关闭失败不影响卸载 */ }
+      }
+      const isolated = state.configFile && state.configFile !== CONFIG_FILE
+      let saidGoodbye = false
+      if (!isolated) {
+        for (const inst of state.instances ?? []) {
+          const result = sendFarewell(state, inst, 'plugin-unload')
+          if (result.ok) saidGoodbye = true
+        }
+      }
+      if (saidGoodbye) {
+        const timer = setTimeout(closeNow, 1450)
+        if (typeof timer.unref === 'function') timer.unref()
+      } else {
+        closeNow()
+      }
     })
 
     // 阶段 1：先探测模型（只读）。探测失败不抛错，渲染侧降级成占位。
@@ -6310,6 +8860,9 @@ export function apply(ctx, rawConfig) {
 
     // 0.13.0：主动唤醒调度器（定时叫醒；与按钮唤醒共用滚动额度）
     startWakeLoop(state, log, registerCleanup)
+
+    // P1：宿主侧陪伴行为（定时机制保留，事件驱动可独立开关）
+    startLifeLoop(state, log, registerCleanup)
 
     state.phase = 'ready'
     log.info(`live2d: ${STAGE} v${VERSION} 已加载，webServer=${state.routesRegistered}，事件订阅=${state.eventSubscription?.subscribed ?? 0}`)

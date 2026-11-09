@@ -1,7 +1,7 @@
 // 安装前自检：patch 结构与 entry id 冲突
 //
 // 用法（在插件包里）：
-//   node tools/check-patch-ids.mjs --profile "%USERPROFILE%\.dsh\profiles\desktop" --plugin .
+//   node tools/check-patch-ids.mjs --profile "<你的 DSH profile 路径>" --plugin .
 //
 // 做三件事（全部只读，不装任何东西）：
 //   1. 用 yaml 解析本插件的 cordis.patch.yml，并按 dsh-app-boot 的 patch schema 做结构校验；

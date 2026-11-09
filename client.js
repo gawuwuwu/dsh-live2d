@@ -225,6 +225,7 @@ window.__ModuleLoader__.load({
         autoOpenWindow: config.autoOpenWindow !== false,
         adjustMode: config.adjustMode === true,
         replyStyle: config.replyStyle === 'card' ? 'card' : 'bubble',
+        bubbleSkin: ['classic', 'cloud', 'signboard', 'note'].includes(config.bubbleSkin) ? config.bubbleSkin : 'classic',
         replyOpacity: typeof config.replyOpacity === 'number' ? config.replyOpacity : 0.9,
         replyFontSize: config.replyFontSize ?? 15,
         replyMaxHeightPct: config.replyMaxHeightPct ?? 45,
@@ -244,6 +245,10 @@ window.__ModuleLoader__.load({
         autoBubble: config.autoBubble !== false,
         autoInteract: config.autoInteract !== false,
         idlePresets: config.idlePresets !== false,
+        audienceAwareEnabled: config.audienceAwareEnabled !== false,
+        memoryEnabled: config.memoryEnabled === true,
+        memoryMaxEntries: config.memoryMaxEntries ?? 100,
+        dualRelationEnabled: config.dualRelationEnabled !== false,
         customActions: Array.isArray(config.customActions) ? config.customActions : [],
         presetSequencesRaw: Array.isArray(config.presetSequences) ? config.presetSequences : [],
         presetSteps: Array.isArray(config.presetSequences?.[0]?.steps) ? config.presetSequences[0].steps : [],
@@ -255,10 +260,26 @@ window.__ModuleLoader__.load({
         screenCaptureAutoConfirm: config.screenCaptureAutoConfirm === true,
         screenCaptureIntervalSec: (config.screenCaptureIntervalMs ?? 30000) / 1000,
         // 0.13.0：主动唤醒（开关默认关；间隔秒；额度/小时；截图子开关）
+        wakeDriver: ['off', 'timer', 'event'].includes(config.wakeDriver) ? config.wakeDriver : 'off',
         wakeEnabled: config.wakeEnabled === true,
         wakeIntervalSec: (config.wakeIntervalMs ?? 30000) / 1000,
         wakeCaptureEnabled: config.wakeCaptureEnabled === true,
         wakeMaxPerHour: config.wakeMaxPerHour ?? 60,
+        lifeEnabled: config.lifeEnabled !== false,
+        lifeNonverbalEnabled: config.lifeNonverbalEnabled !== false,
+        lifeNonverbalCooldownSec: (config.lifeNonverbalCooldownMs ?? 12000) / 1000,
+        eventWakeEnabled: config.eventWakeEnabled === true,
+        eventWakeFocusMin: (config.eventWakeFocusMs ?? 2700000) / 60000,
+        eventWakeAwayMin: (config.eventWakeAwayMs ?? 600000) / 60000,
+        eventWakeTitleIntervalSec: (config.eventWakeTitleIntervalMs ?? 30000) / 1000,
+        eventWakeCooldownSec: (config.eventWakeCooldownMs ?? 180000) / 1000,
+        eventWakeMaxPerHour: config.eventWakeMaxPerHour ?? 8,
+        lifeShareBudgetPerDay: config.lifeShareBudgetPerDay ?? 5,
+        lifeImportantBudgetPerDay: config.lifeImportantBudgetPerDay ?? 3,
+        eventQuietEnabled: config.eventQuietEnabled === true,
+        eventQuietStart: config.eventQuietStart ?? '23:00',
+        eventQuietEnd: config.eventQuietEnd ?? '08:00',
+        lifeFarewellEnabled: config.lifeFarewellEnabled !== false,
         aiMoveEnabled: config.aiMoveEnabled === true,
         ttsEnabled: config.ttsEnabled === true,
         ttsAutoSpeak: config.ttsAutoSpeak === true,
@@ -286,6 +307,7 @@ window.__ModuleLoader__.load({
         autoOpenWindow: draft.autoOpenWindow,
         adjustMode: draft.adjustMode,
         replyStyle: draft.replyStyle,
+        bubbleSkin: draft.bubbleSkin,
         replyOpacity: Number(draft.replyOpacity),
         replyFontSize: Number(draft.replyFontSize),
         replyMaxHeightPct: Number(draft.replyMaxHeightPct),
@@ -304,6 +326,10 @@ window.__ModuleLoader__.load({
         autoBubble: Boolean(draft.autoBubble),
         autoInteract: Boolean(draft.autoInteract),
         idlePresets: Boolean(draft.idlePresets),
+        audienceAwareEnabled: Boolean(draft.audienceAwareEnabled),
+        memoryEnabled: Boolean(draft.memoryEnabled),
+        memoryMaxEntries: Math.min(500, Math.max(20, Math.round(Number(draft.memoryMaxEntries) || 100))),
+        dualRelationEnabled: Boolean(draft.dualRelationEnabled),
         customActions: Array.isArray(draft.customActions) ? draft.customActions : [],
         presetSequences: (() => {
           const others = (draft.presetSequencesRaw ?? []).filter((item) => item.id !== 'user-loop')
@@ -318,10 +344,26 @@ window.__ModuleLoader__.load({
         screenCaptureAutoConfirm: Boolean(draft.screenCaptureAutoConfirm),
         screenCaptureIntervalMs: Math.round(Number(draft.screenCaptureIntervalSec) * 1000),
         // 0.13.0：主动唤醒
-        wakeEnabled: Boolean(draft.wakeEnabled),
+        wakeDriver: ['off', 'timer', 'event'].includes(draft.wakeDriver) ? draft.wakeDriver : 'off',
+        wakeEnabled: draft.wakeDriver === 'timer',
         wakeIntervalMs: Math.round(Math.min(600, Math.max(15, Number(draft.wakeIntervalSec) || 30)) * 1000),
         wakeCaptureEnabled: Boolean(draft.wakeCaptureEnabled),
         wakeMaxPerHour: Math.min(360, Math.max(1, Math.round(Number(draft.wakeMaxPerHour) || 60))),
+        lifeEnabled: Boolean(draft.lifeEnabled),
+        lifeNonverbalEnabled: Boolean(draft.lifeNonverbalEnabled),
+        lifeNonverbalCooldownMs: Math.round(Math.min(300, Math.max(3, Number(draft.lifeNonverbalCooldownSec) || 12)) * 1000),
+        eventWakeEnabled: draft.wakeDriver === 'event',
+        eventWakeFocusMs: Math.round(Math.min(120, Math.max(1, Number(draft.eventWakeFocusMin) || 45)) * 60_000),
+        eventWakeAwayMs: Math.round(Math.min(120, Math.max(1, Number(draft.eventWakeAwayMin) || 10)) * 60_000),
+        eventWakeTitleIntervalMs: Math.round(Math.min(300, Math.max(10, Number(draft.eventWakeTitleIntervalSec) || 30)) * 1000),
+        eventWakeCooldownMs: Math.round(Math.min(3600, Math.max(30, Number(draft.eventWakeCooldownSec) || 180)) * 1000),
+        eventWakeMaxPerHour: Math.min(120, Math.max(1, Math.round(Number(draft.eventWakeMaxPerHour) || 8))),
+        lifeShareBudgetPerDay: Math.min(50, Math.max(0, Number.isFinite(Number(draft.lifeShareBudgetPerDay)) ? Math.round(Number(draft.lifeShareBudgetPerDay)) : 5)),
+        lifeImportantBudgetPerDay: Math.min(30, Math.max(0, Number.isFinite(Number(draft.lifeImportantBudgetPerDay)) ? Math.round(Number(draft.lifeImportantBudgetPerDay)) : 3)),
+        eventQuietEnabled: Boolean(draft.eventQuietEnabled),
+        eventQuietStart: draft.eventQuietStart,
+        eventQuietEnd: draft.eventQuietEnd,
+        lifeFarewellEnabled: Boolean(draft.lifeFarewellEnabled),
         aiMoveEnabled: Boolean(draft.aiMoveEnabled),
         ttsEnabled: Boolean(draft.ttsEnabled),
         ttsAutoSpeak: Boolean(draft.ttsAutoSpeak),
@@ -338,22 +380,312 @@ window.__ModuleLoader__.load({
       return payload
     }
 
-    // 内置动作（与宿主 ANIM_WHITELIST 对齐；中文名只用于设置页展示）
-    const BUILTIN_ACTIONS = [
-      { id: 'nod', label: '点头' },
-      { id: 'shake', label: '摇头' },
-      { id: 'tilt', label: '歪头' },
-      { id: 'happy', label: '开心' },
-      { id: 'shy', label: '害羞' },
-      { id: 'surprised', label: '惊讶' },
-      { id: 'blink', label: '眨眼' },
-      { id: 'angry', label: '生气' },
-      { id: 'drool', label: '流口水' },
-      { id: 'xx', label: 'X 眼' },
-      { id: 'puff', label: '栗子嘴' },
-    ]
+    // 动作调整模板：固定选项只负责组织可读需求，真正适配模型参数由 AI + live2d_preset 完成。
+    const ACTION_ADJUST_OPTIONS = {
+      amplitude: ['很小', '稍小', '适中', '较大', '很大'],
+      frequency: ['更慢', '稍慢', '适中', '较快', '很快'],
+      duration: ['很短', '稍短', '适中', '稍长', '很长'],
+    }
+
+    function buildActionAdjustPrompt({ profile, target, action, kind, amplitude, frequency, duration, note }) {
+      const fixed = [
+        amplitude ? `- 动作幅度：${amplitude}` : '',
+        frequency ? `- 动作频率：${frequency}` : '',
+        duration ? `- 动作时间：${duration}` : '',
+      ].filter(Boolean)
+      const actionKind = kind === 'default' ? '默认动作' : '自定义动作'
+      return [
+        '[Live2D 动作调整请求]',
+        `模型档案：${profile?.label || profile?.id || '未命名'}（${profile?.pathKey || '未知路径'}）`,
+        `实例：${target?.id || '未知'}${target?.title ? ` / ${target.title}` : ''}`,
+        `要调整的动作：${action?.label || action?.id || '未知'}（${actionKind}）`,
+        `动作 ID：${action?.id || '未知'}`,
+        `当前时长：${Number(action?.durationMs) || '未知'}ms`,
+        '当前动作定义：',
+        '```json',
+        JSON.stringify({ id: action?.id, label: action?.label, durationMs: action?.durationMs, tracks: action?.tracks ?? [] }, null, 2),
+        '```',
+        '',
+        '用户要求：',
+        ...(fixed.length ? fixed : ['- 未选择固定模板']),
+        note ? `- 其他调整：${note}` : '',
+        '',
+        '执行要求：',
+        '1. 先调用 live2d_preset list 核对当前档案，再调用 live2d_params 查这只模型真实存在的参数。',
+        '2. 保留原动作的意图，只调整用户指定的幅度、频率、时长或其它要求；不要写模型不存在的参数。',
+        `3. 用 live2d_preset define 保存调整后的动作，id 必须继续使用 "${action?.id || ''}"。如果这是默认动作，就创建一个同 ID 的自定义覆盖层，让菜单用调整后的版本替换默认版本。`,
+        '4. 保存后简要说明改了哪些参数，不要只回复计划。',
+      ].filter((line) => line !== '').join('\n')
+    }
 
     const sessionLabel = (item) => `${item.title || '(无标题会话)'} · ${String(item.id).slice(0, 10)}`
+
+    function findVisibleControl(pattern) {
+      const nodes = document.querySelectorAll('button, [role="button"], a')
+      for (const node of nodes) {
+        if (node.disabled || node.getClientRects().length === 0) continue
+        const text = [
+          node.getAttribute('aria-label'),
+          node.getAttribute('title'),
+          node.textContent,
+        ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
+        if (pattern.test(text)) return node
+      }
+      return null
+    }
+
+    /**
+     * 从模型窗口的“循环设置”跳回 DSH 主界面的 Live2D 动作页。
+     * DSH 没有提供跨窗口的 settings.open 客户端 API，因此用可见控件导航：
+     * 先打开“设置”，再点 Live2D，并派发事件把页面切回“动作”标签。
+     */
+    function openLive2DSettings() {
+      window.focus?.()
+      let attempts = 0
+      const choose = () => {
+        const live2d = findVisibleControl(/^Live2D(?:\s|$)/i)
+        if (live2d) {
+          live2d.click()
+          window.dispatchEvent(new CustomEvent('live2d:open-actions-settings'))
+          setTimeout(() => window.dispatchEvent(new CustomEvent('live2d:open-actions-settings')), 180)
+          return
+        }
+        if (attempts === 0) {
+          const settings = findVisibleControl(/^(设置|Settings)(?:\s|$)/i)
+          settings?.click()
+        }
+        attempts += 1
+        if (attempts < 24) setTimeout(choose, 100)
+      }
+      choose()
+    }
+
+    /**
+     * 输入框权限按钮旁的模型快捷开关。
+     * 复用 /instances + /window；只显示 config.enabled !== false 的模型。
+     */
+    function Live2DQuickButtons() {
+      const [instances, setInstances] = React.useState([])
+      const [busy, setBusy] = React.useState('')
+      const load = React.useCallback(async () => {
+        const result = await call('/instances')
+        setInstances(Array.isArray(result?.instances) ? result.instances : [])
+      }, [])
+      React.useEffect(() => {
+        load()
+        const timer = setInterval(() => {
+          if (document.visibilityState !== 'hidden') load()
+        }, 5000)
+        const onVisible = () => { if (document.visibilityState === 'visible') load() }
+        document.addEventListener('visibilitychange', onVisible)
+        return () => {
+          clearInterval(timer)
+          document.removeEventListener('visibilitychange', onVisible)
+        }
+      }, [load])
+      React.useEffect(() => {
+        let alive = true
+        let timer = null
+        const poll = async () => {
+          const result = await call('/ui-command')
+          if (alive && result?.ok && result.command?.type === 'open-settings') openLive2DSettings()
+          if (alive) timer = setTimeout(poll, 1200)
+        }
+        timer = setTimeout(poll, 700)
+        return () => {
+          alive = false
+          if (timer) clearTimeout(timer)
+        }
+      }, [])
+      const enabled = instances
+        .map((item, index) => ({ item, slot: index + 1 }))
+        .filter(({ item }) => item?.config?.enabled !== false)
+      if (!enabled.length) return null
+      const toggle = async (item, slot) => {
+        const open = item.window?.ready === true || ['starting', 'rendering', 'running'].includes(item.window?.state)
+        setBusy(item.id)
+        const result = await call('/window', {
+          method: 'POST',
+          body: JSON.stringify({ action: open ? 'close' : 'open', instanceId: item.id }),
+        })
+        if (result?.ok !== true) {
+          setBusy('')
+          return
+        }
+        setTimeout(() => {
+          setBusy('')
+          load()
+        }, open ? 1500 : 500)
+      }
+      return h(
+        'div',
+        {
+          style: { display: 'inline-flex', alignItems: 'center', gap: 5, marginLeft: 4 },
+          'data-live2d-quick-toggle': '1',
+        },
+        ...enabled.map(({ item, slot }) => {
+          const open = item.window?.ready === true || ['starting', 'rendering', 'running'].includes(item.window?.state)
+          return h(
+            'button',
+            {
+              key: item.id,
+              type: 'button',
+              title: `${open ? '关闭' : '打开'}模型 ${slot}`,
+              'aria-label': `${open ? '关闭' : '打开'}模型 ${slot}`,
+              disabled: busy === item.id,
+              onClick: () => toggle(item, slot),
+              style: {
+                height: 24,
+                padding: '0 8px',
+                borderRadius: 7,
+                border: '1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.14))',
+                background: open ? 'rgba(86,132,230,.16)' : 'var(--dsw-alias-bg-layer-1)',
+                color: 'inherit',
+                cursor: busy === item.id ? 'default' : 'pointer',
+                font: 'inherit',
+                fontSize: 11,
+                opacity: busy === item.id ? 0.55 : 1,
+                whiteSpace: 'nowrap',
+              },
+            },
+            `模型${slot} ${open ? '■' : '▷'}`,
+          )
+        }),
+      )
+    }
+
+    function MemoryPanel({ instanceId, sessionId, enabled }) {
+      const [entries, setEntries] = React.useState([])
+      const [text, setText] = React.useState('')
+      const [kind, setKind] = React.useState('preference')
+      const [tags, setTags] = React.useState('')
+      const [editingId, setEditingId] = React.useState('')
+      const [editingText, setEditingText] = React.useState('')
+      const [busy, setBusy] = React.useState('')
+      const [notice, setNotice] = React.useState('')
+      const load = React.useCallback(async () => {
+        if (!sessionId) {
+          setEntries([])
+          return
+        }
+        const result = await call(`/memory?instanceId=${encodeURIComponent(instanceId)}`)
+        setEntries(Array.isArray(result?.entries) ? result.entries : [])
+        if (!result?.ok) setNotice(result?.error || '读取记忆失败')
+      }, [instanceId, sessionId])
+      React.useEffect(() => { load() }, [load])
+      const act = async (op, extra = {}) => {
+        setBusy(op)
+        setNotice('')
+        const result = await call('/memory', {
+          method: 'POST',
+          body: JSON.stringify({ instanceId, op, ...extra }),
+        })
+        setNotice(result?.ok ? '已更新' : (result?.error || '操作失败'))
+        await load()
+        setBusy('')
+      }
+      const add = async () => {
+        if (!text.trim()) return
+        await act('remember', { text, kind, tags, importance: 3 })
+        setText('')
+        setTags('')
+      }
+      return h(
+        'div',
+        { style: { ...S.card, marginTop: 10 }, 'data-live2d-memory': '1' },
+        h('p', { style: S.sub }, '陪伴记忆 · 按对话隔离'),
+        h('p', { style: S.hint }, sessionId
+          ? `当前绑定：${String(sessionId).slice(0, 18)}…。切换对话会切换整套记忆；“遗忘”只休眠，不提删数据。`
+          : '当前实例还没有绑定对话。绑定后才能为这个对话建立记忆。'),
+        !enabled
+          ? h('p', { style: S.warn }, '记忆已关闭：不会注入提示词，也不会接受 AI 写入。你当前机器的存量配置默认关闭。')
+          : null,
+        enabled && sessionId
+          ? h(
+            'div',
+            { style: { ...S.row, marginTop: 8, flexWrap: 'wrap' } },
+            h('select', { style: S.select, value: kind, onChange: (event) => setKind(event.target.value) },
+              h('option', { value: 'preference' }, '偏好'),
+              h('option', { value: 'fact' }, '事实'),
+              h('option', { value: 'event' }, '共同经历'),
+              h('option', { value: 'promise' }, '约定'),
+              h('option', { value: 'relationship' }, '关系')),
+            h('input', {
+              style: { ...S.input, flex: '1 1 260px' },
+              value: text,
+              maxLength: 500,
+              placeholder: '例如：不喜欢被叫全名；答应周末提醒她休息',
+              onChange: (event) => setText(event.target.value),
+            }),
+            h('input', {
+              style: { ...S.num, width: 118 },
+              value: tags,
+              placeholder: '标签,逗号分隔',
+              onChange: (event) => setTags(event.target.value),
+            }),
+            h('button', { type: 'button', style: S.primary, disabled: busy === 'remember' || !text.trim(), onClick: add }, '记住'),
+          )
+          : null,
+        entries.length
+          ? h(
+            'div',
+            { style: { marginTop: 8, display: 'grid', gap: 7 } },
+            ...entries.map((entry) => h(
+              'div',
+              {
+                key: entry.id,
+                style: {
+                  padding: '7px 9px',
+                  borderRadius: 8,
+                  border: '1px solid var(--dsw-alias-border-l2, rgba(0,0,0,.12))',
+                  opacity: entry.dormant ? 0.56 : 1,
+                },
+              },
+              h('div', { style: { ...S.row, justifyContent: 'space-between', gap: 8 } },
+                h('span', { style: S.hint }, `${entry.kind}${entry.dormant ? ' · 已遗忘，重新提起可想起' : ' · 活跃'}`),
+                h('span', { style: S.hint }, new Date(entry.updatedAt).toLocaleString())),
+              editingId === entry.id
+                ? h('div', { style: { ...S.row, marginTop: 5 } },
+                  h('input', {
+                    style: { ...S.input, flex: '1 1 260px' },
+                    value: editingText,
+                    maxLength: 500,
+                    onChange: (event) => setEditingText(event.target.value),
+                  }),
+                  h('button', {
+                    type: 'button', style: S.btn, disabled: busy === 'update',
+                    onClick: async () => {
+                      await act('update', { id: entry.id, text: editingText })
+                      setEditingId('')
+                    },
+                  }, '保存'),
+                  h('button', { type: 'button', style: S.miniBtn, onClick: () => setEditingId('') }, '取消'))
+                : h('p', { style: { margin: '5px 0 0', whiteSpace: 'pre-wrap', userSelect: 'text' } }, entry.text),
+              entry.tags?.length ? h('p', { style: S.hint }, entry.tags.join(' · ')) : null,
+              h('div', { style: { ...S.row, marginTop: 4 } },
+                h('button', {
+                  type: 'button', style: S.miniBtn,
+                  onClick: () => {
+                    setEditingId(entry.id)
+                    setEditingText(entry.text)
+                  },
+                }, '编辑'),
+                entry.dormant
+                  ? h('button', { type: 'button', style: S.miniBtn, disabled: busy === 'recall', onClick: () => act('recall', { id: entry.id }) }, '重新想起')
+                  : h('button', { type: 'button', style: S.miniBtn, disabled: busy === 'forget', onClick: () => act('forget', { id: entry.id }) }, '遗忘'),
+              ),
+            )),
+          )
+          : h('p', { style: { ...S.hint, marginTop: 8 } }, sessionId ? '这个对话还没有记忆。' : ''),
+        enabled && sessionId && entries.some((entry) => !entry.dormant)
+          ? h('button', {
+            type: 'button', style: { ...S.miniBtn, marginTop: 8 }, disabled: busy === 'forget-old',
+            onClick: () => act('forget-old', { olderThanDays: 90 }),
+          }, '把 90 天未更新的记忆转为“已遗忘”')
+          : null,
+        notice ? h('p', { style: S.hint }, notice) : null,
+      )
+    }
 
     function Live2DSettings() {
       const [instances, setInstances] = React.useState([])
@@ -369,16 +701,36 @@ window.__ModuleLoader__.load({
       // 0.13.3：设置页改成 tab（动作 / 模型1 / 模型2）
       const [activeTabKey, setActiveTabKey] = React.useState('actions')
       const [actionTargetId, setActionTargetId] = React.useState('')
+      // 0.3.2：动作/循环按「模型档案」共享（同一模型共用一份，不同模型各用各的）
+      const [profiles, setProfiles] = React.useState([])
+      const [activeProfileId, setActiveProfileId] = React.useState('')
+      const [profileDetail, setProfileDetail] = React.useState(null)
+      const [profileTick, setProfileTick] = React.useState(0)
+      const [historyOpen, setHistoryOpen] = React.useState(false)
       const [newAction, setNewAction] = React.useState({ label: '', description: '', draft: null })
+      const [actionAdjust, setActionAdjust] = React.useState({
+        actionKey: '', amplitude: '', frequency: '', duration: '', note: '',
+      })
       const [newLoop, setNewLoop] = React.useState({ editingId: '', label: '', steps: [], intervalSec: 8, targets: [] })
+
+      React.useEffect(() => {
+        const openActions = () => setActiveTabKey('actions')
+        window.addEventListener('live2d:open-actions-settings', openActions)
+        return () => window.removeEventListener('live2d:open-actions-settings', openActions)
+      }, [])
 
       const load = React.useCallback(async () => {
         setBusy('load')
-        const [instRes, healthData, sessionData, modelData, configData] = await Promise.all([
-          call('/instances'), call('/health'), call('/sessions'), call('/models'), call('/config'),
+        const [instRes, healthData, sessionData, modelData, configData, profileRes] = await Promise.all([
+          call('/instances'), call('/health'), call('/sessions'), call('/models'), call('/config'), call('/profiles'),
         ])
         const list = Array.isArray(instRes?.instances) ? instRes.instances : []
         setInstances(list)
+        const profileList = Array.isArray(profileRes?.profiles) ? profileRes.profiles : []
+        setProfiles(profileList)
+        setActiveProfileId((current) => (current && profileList.some((item) => item.id === current)
+          ? current
+          : (profileList.find((item) => item.inUse)?.id ?? profileList[0]?.id ?? '')))
         // 表单草稿必须用**完整配置**（/config 里的 instances）重建。
         // /instances 返回的是摘要（id/绑定/模型/渲染状态/告警），没有 adjustMode、宽高、气泡等字段，
         // 拿摘要重建会把用户刚保存的值显示成默认值（窗口实际仍是旧值 → 看起来像「保存被重置」）。
@@ -399,6 +751,63 @@ window.__ModuleLoader__.load({
       }, [])
 
       React.useEffect(() => { load() }, [load])
+
+      // 0.3.2：动作/循环住在「模型档案」里（按模型共享，不同模型各用各的）
+      React.useEffect(() => {
+        let alive = true
+        if (!activeProfileId) {
+          setProfileDetail(null)
+          return () => { alive = false }
+        }
+        call(`/profiles/${encodeURIComponent(activeProfileId)}`)
+          .then((data) => { if (alive) setProfileDetail(data?.ok ? data : null) })
+          .catch(() => { if (alive) setProfileDetail(null) })
+        return () => { alive = false }
+      }, [activeProfileId, profileTick])
+
+      const profile = profileDetail?.profile ?? null
+      // 绑定该档案的实例（没有就用第一个实例兜底，保证预览/播放有窗口可发）
+      const profileInstanceIds = Array.isArray(profileDetail?.boundInstanceIds) && profileDetail.boundInstanceIds.length
+        ? profileDetail.boundInstanceIds
+        : instances.slice(0, 1).map((item) => item.id)
+
+      const patchActiveProfile = async (patch) => {
+        if (!activeProfileId) {
+          setNotice({ kind: 'warn', text: '先在上面选一个模型档案（没有的话先添加模型）' })
+          return null
+        }
+        setBusy(`profile:${activeProfileId}`)
+        const result = await call(`/profiles/${encodeURIComponent(activeProfileId)}`, { method: 'PATCH', body: JSON.stringify(patch) })
+        setNotice(result?.ok
+          ? { kind: 'ok', text: `已保存到模型档案「${profile?.label || activeProfileId}」` }
+          : { kind: 'warn', text: result?.error || result?.code || '保存失败' })
+        setProfileTick((value) => value + 1)
+        await load()
+        setBusy('')
+        return result
+      }
+
+      const savePresetsToProfile = (customActions, presetSequences) => patchActiveProfile(
+        customActions === undefined ? { presetSequences } : { customActions, presetSequences },
+      )
+
+      // 0.4.0：让宿主按这只模型真实有的参数重挑 10 个默认动作
+      const regenerateAutoActions = async () => {
+        if (!activeProfileId) {
+          setNotice({ kind: 'warn', text: '先在上面选一个模型档案' })
+          return
+        }
+        setBusy('auto-actions')
+        const result = await call(`/profiles/${encodeURIComponent(activeProfileId)}/auto-actions`, {
+          method: 'POST',
+          body: JSON.stringify({ force: true }),
+        })
+        setNotice(result?.ok
+          ? { kind: 'ok', text: `已按模型能力生成 ${result.count ?? 0} 个默认动作` }
+          : { kind: 'warn', text: result?.error || result?.code || '生成失败' })
+        setProfileTick((value) => value + 1)
+        setBusy('')
+      }
 
       const draftOf = (id) => drafts[id] || null
       const patchDraft = (id, key, value) =>
@@ -445,7 +854,7 @@ window.__ModuleLoader__.load({
         }
         const keys = [
           'windowWidth', 'windowHeight', 'modelScalePct', 'modelLayoutMode',
-          'replyFontSize', 'replyOpacity', 'replyHeightRatio', 'replyStyle',
+          'replyFontSize', 'replyOpacity', 'replyHeightRatio', 'replyStyle', 'bubbleSkin',
           'bubbleFixedSize', 'bubbleHeightPx',
         ]
         const patch = {}
@@ -718,12 +1127,25 @@ window.__ModuleLoader__.load({
           h(SectionTitle, { title: '对话与气泡', hint: '回复样式、显示时长和三种运行模式' }),
           h(
             Field,
-            { label: '回答样式', hint: '气泡 = 模型上方的窄气泡；卡片 = 通栏卡片。保存后立即生效。' },
+            { label: '回答版式 / 气泡外观', hint: '版式决定气泡或卡片；气泡外观只在「气泡」版式下生效。保存后立即应用。' },
             h(
               'select',
               { style: S.select, value: draft.replyStyle, onChange: (event) => patchDraft(inst.id, 'replyStyle', event.target.value) },
-              h('option', { value: 'bubble' }, '气泡'),
+              h('option', { value: 'bubble' }, '气泡 / 对话'),
               h('option', { value: 'card' }, '方块卡片'),
+            ),
+            h(
+              'select',
+              {
+                style: { ...S.select, opacity: draft.replyStyle === 'bubble' ? 1 : 0.45 },
+                value: draft.bubbleSkin,
+                disabled: draft.replyStyle !== 'bubble',
+                onChange: (event) => patchDraft(inst.id, 'bubbleSkin', event.target.value),
+              },
+              h('option', { value: 'classic' }, '经典气泡'),
+              h('option', { value: 'cloud' }, '云朵气泡'),
+              h('option', { value: 'signboard' }, '告示牌'),
+              h('option', { value: 'note' }, '便签纸'),
             ),
             h(
               'span',
@@ -879,7 +1301,7 @@ window.__ModuleLoader__.load({
             Field,
             { label: '参考音 / 参考文本', hint: '参考音是 CosyVoice2 的 prompt（wav 路径）；参考文本是那段音频的内容。' },
             h('input', {
-              style: { ...S.num, width: 300 }, type: 'text', placeholder: '你的参考音.wav',
+              style: { ...S.num, width: 300 }, type: 'text', placeholder: 'D:\\…\\liuying.wav',
               value: draft.ttsPrompt,
               onChange: (event) => patchDraft(inst.id, 'ttsPrompt', event.target.value),
             }),
@@ -891,7 +1313,7 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', style: S.btn, disabled: busy === `tts:${inst.id}`, onClick: () => probeTts(inst.id) }, busy === `tts:${inst.id}` ? '合成中…' : '试听'),
           ),
 
-          h(SectionTitle, { title: '测试与维护', hint: '保存、测试气泡/语音、试玩动作和循环' }),
+          h(SectionTitle, { title: '测试与维护', hint: '保存、测试气泡与语音；动作统一在「动作」页管理' }),
           h(
             'div',
             { style: { ...S.row, marginTop: 6 } },
@@ -900,37 +1322,6 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', style: S.btn, disabled: busy === `bubble:${inst.id}`, onClick: () => bubble(inst.id, { text: 'Live2D 气泡测试：这一句来自设置页。' }) }, '发测试气泡'),
           ),
 
-          // 表情/动作试玩：先点一个看看效果，不用等 AI 发
-          // 每只模型参数不同：0 轨 = 这个模型没有对应参数，按钮置灰并说明原因
-          (() => {
-            const cap = instances.find((item) => item.id === inst.id)?.renderer?.capability ?? null
-            const support = cap && Array.isArray(cap.actions)
-              ? Object.fromEntries(cap.actions.map((item) => [item.id, item]))
-              : {}
-            return h(
-              'div',
-              { style: { ...S.row, marginTop: 6, flexWrap: 'wrap' } },
-              h('span', { style: S.dim }, '试玩：'),
-              ...['nod', 'tilt', 'happy', 'shy', 'surprised', 'angry', 'drool', 'xx', 'puff'].map((action) => {
-                const info = support[action]
-                const dead = info && info.usable === 0
-                const partial = info && info.usable > 0 && info.missing > 0
-                return h('button', {
-                  key: action,
-                  type: 'button',
-                  style: dead ? { ...S.btn, opacity: 0.45 } : S.btn,
-                  disabled: busy === `anim:${inst.id}` || Boolean(dead),
-                  title: dead
-                    ? `这只模型没有这个动作需要的参数（缺 ${info.missing} 个），点不动；可以让 AI 先看 /live2d/params 再设计一个`
-                    : (partial ? `部分生效：${info.total} 轨里只有 ${info.usable} 轨能落地` : ''),
-                  onClick: () => anim(inst.id, action),
-                }, action)
-              }),
-              cap ? null : h('span', { style: S.dim }, '（还没收到这只模型的参数表，重开窗口后会出现可用性标记）'),
-            )
-          })(),
-          // 0.13.9：循环统一挪到「动作」页管理，这里只留单次试玩
-          h('p', { style: { ...S.dim, marginTop: 8 } }, '动作循环已移到「动作」页统一管理（可同时绑定两个模型）。'),
           warnList.length
             ? h('ul', { style: { margin: '6px 0 0', paddingLeft: 18 } }, warnList.map((item, index) => h('li', { key: index, style: S.warn }, item)))
             : null,
@@ -947,7 +1338,7 @@ window.__ModuleLoader__.load({
       }
 
       const designDraft = async () => {
-        const target = instances.find((item) => item.id === actionTargetId) || instances[0]
+        const target = instances.find((item) => profileInstanceIds.includes(item.id)) || instances[0]
         if (!target) return
         if (!newAction.label && !newAction.description) {
           setNotice({ kind: 'warn', text: '先写动作名或一句说明' })
@@ -968,13 +1359,19 @@ window.__ModuleLoader__.load({
       }
 
       const previewDraft = async () => {
-        if (!instances.length || !newAction.draft) return
+        if (!newAction.draft) return
+        // 只在该档案绑定的窗口里预览（没有绑定实例时退回第一个实例）
+        const ids = profileInstanceIds.length ? profileInstanceIds : instances.slice(0, 1).map((item) => item.id)
+        if (!ids.length) {
+          setNotice({ kind: 'warn', text: '没有可用的模型窗口' })
+          return
+        }
         setBusy('preview')
         let okCount = 0
-        for (const inst of instances) {
+        for (const id of ids) {
           const result = await call('/preset', {
             method: 'POST',
-            body: JSON.stringify({ op: 'preview', instanceId: inst.id, draft: newAction.draft }),
+            body: JSON.stringify({ op: 'preview', instanceId: id, draft: newAction.draft }),
           })
           if (result?.ok) okCount += 1
         }
@@ -985,15 +1382,55 @@ window.__ModuleLoader__.load({
       }
 
       const saveDraft = async () => {
-        if (!instances.length || !newAction.draft) return
-        // 动作默认对所有模型生效（不再有「应用到哪个模型」）
-        for (const inst of instances) {
-          const draft = draftOf(inst.id)
-          const existing = Array.isArray(draft?.customActions) ? draft.customActions : []
-          const next = [...existing.filter((item) => item.id !== newAction.draft.id), newAction.draft]
-          await patchInstancePart(inst.id, { customActions: next })
+        if (!newAction.draft) return
+        if (!profile) {
+          setNotice({ kind: 'warn', text: '先选一个模型档案' })
+          return
         }
-        setNewAction({ label: '', description: '', draft: null })
+        const existing = Array.isArray(profile.customActions) ? profile.customActions : []
+        const next = [...existing.filter((item) => item.id !== newAction.draft.id), newAction.draft]
+        const saved = await savePresetsToProfile(next, Array.isArray(profile.presetSequences) ? profile.presetSequences : [])
+        if (saved?.ok) setNewAction({ label: '', description: '', draft: null })
+      }
+
+      const sendActionAdjustment = async (action, kind) => {
+        if (!action) {
+          setNotice({ kind: 'warn', text: '先在动作调整框里选择要调整的动作' })
+          return
+        }
+        if (!actionAdjust.amplitude && !actionAdjust.frequency && !actionAdjust.duration && !actionAdjust.note.trim()) {
+          setNotice({ kind: 'warn', text: '至少选择一个固定调整，或填写其它调整要求' })
+          return
+        }
+        const boundIds = Array.isArray(profileDetail?.boundInstanceIds) ? profileDetail.boundInstanceIds : []
+        const target = instances.find((item) => boundIds.includes(item.id)) || null
+        const sessionId = target?.config?.sessionId || target?.sessionId || ''
+        if (!target || !sessionId) {
+          setNotice({ kind: 'warn', text: '这张动作档案的模型还没有绑定会话，无法把调整交给 AI' })
+          return
+        }
+        if (!window.confirm('这次调整会调用 AI，会消耗 Token。确定发送吗？')) return
+
+        setBusy('action-adjust')
+        const text = buildActionAdjustPrompt({
+          profile,
+          target,
+          action,
+          kind,
+          amplitude: actionAdjust.amplitude,
+          frequency: actionAdjust.frequency,
+          duration: actionAdjust.duration,
+          note: actionAdjust.note.trim(),
+        })
+        const result = await call('/inject', {
+          method: 'POST',
+          body: JSON.stringify({ sessionId, text, dryRun: false, mode: 'followup' }),
+        })
+        const dispatched = result?.ok === true && result?.dispatched === true && result?.settled?.ok !== false
+        setNotice(dispatched
+          ? { kind: 'ok', text: '调整要求已发给 AI；保存动作后刷新本页即可看到同 ID 的覆盖版本。' }
+          : { kind: 'warn', text: result?.error || result?.settled?.error || '发送失败：会话可能还没激活，先打开对应对话再试' })
+        setBusy('')
       }
 
       const instanceTitleOf = (id) => {
@@ -1018,23 +1455,20 @@ window.__ModuleLoader__.load({
       }
 
       const deleteLoop = async (seq) => {
-        await call('/preset', { method: 'POST', body: JSON.stringify({ op: 'stop', instanceId: instances[0]?.id }) }).catch(() => null)
-        for (const inst of instances) {
-          const draft = draftOf(inst.id)
-          const existing = Array.isArray(draft?.presetSequencesRaw) ? draft.presetSequencesRaw : []
-          if (!existing.some((item) => item.id === seq.id)) continue
-          await patchInstancePart(inst.id, { presetSequences: existing.filter((item) => item.id !== seq.id) })
-        }
+        await call('/preset', { method: 'POST', body: JSON.stringify({ op: 'stop', instanceId: profileInstanceIds[0] || instances[0]?.id }) }).catch(() => null)
+        if (!profile) return
+        const next = (Array.isArray(profile.presetSequences) ? profile.presetSequences : []).filter((item) => item.id !== seq.id)
+        await savePresetsToProfile(Array.isArray(profile.customActions) ? profile.customActions : [], next)
         if (newLoop.editingId === seq.id) setNewLoop({ editingId: '', label: '', steps: [], intervalSec: 8, targets: [] })
       }
 
-      // 预览：让第一台模型把整条循环走一遍（宿主 op:'preview'，once）
+      // 预览：让绑定该档案的实例把整条循环走一遍（宿主 op:'preview' + sequenceId，once）
       const previewLoop = (seq) => {
-        // 按循环自己绑定的模型预览；没勾（= 全部）就每台都走一遍
-        const bound = Array.isArray(seq.targets) && seq.targets.length ? seq.targets : instances.map((item) => item.id)
-        const targets = instances.filter((item) => bound.includes(item.id))
+        const targets = profileInstanceIds.length
+          ? instances.filter((item) => profileInstanceIds.includes(item.id))
+          : instances.slice(0, 1)
         if (!targets.length) {
-          setNotice({ kind: 'warn', text: '这个循环绑定的模型不在列表里，先去「改」里重新选' })
+          setNotice({ kind: 'warn', text: '没有可用的模型窗口' })
           return
         }
         setBusy(`preset:${targets.map((item) => item.id).join(',')}`)
@@ -1052,75 +1486,242 @@ window.__ModuleLoader__.load({
       }
 
       const saveLoop = async () => {
-        if (!instances.length) return
+        if (!profile) {
+          setNotice({ kind: 'warn', text: '先选一个模型档案' })
+          return
+        }
         if (!newLoop.steps.length) {
           setNotice({ kind: 'warn', text: '至少勾一个动作' })
           return
         }
+        const existing = Array.isArray(profile.presetSequences) ? profile.presetSequences : []
         const id = newLoop.editingId || `loop-${Date.now().toString(36).slice(-5)}`
-        const firstDraft = draftOf(instances[0].id)
-        const firstExisting = Array.isArray(firstDraft?.presetSequencesRaw) ? firstDraft.presetSequencesRaw : []
         const seq = {
           id,
-          label: (newLoop.label || `循环 ${firstExisting.length + 1}`).slice(0, 24),
+          label: (newLoop.label || `循环 ${existing.length + 1}`).slice(0, 24),
           steps: newLoop.steps,
           intervalMs: Math.min(60000, Math.max(300, Math.round(Number(newLoop.intervalSec || 8) * 1000))),
           loop: true,
-          // 空 = 所有模型都播；勾了就只播勾中的
-          targets: (newLoop.targets?.length ? newLoop.targets : []).slice(0, 2),
         }
-        // 循环本身写到每个模型上（这样在哪台都能看到/编辑），播放范围由 targets 决定
-        for (const inst of instances) {
-          const draft = draftOf(inst.id)
-          const existing = Array.isArray(draft?.presetSequencesRaw) ? draft.presetSequencesRaw : []
-          await patchInstancePart(inst.id, { presetSequences: [...existing.filter((item) => item.id !== id), seq] })
-        }
-        setNewLoop({ editingId: '', label: '', steps: [], intervalSec: 8, targets: [] })
+        const next = [...existing.filter((item) => item.id !== id), seq]
+        const saved = await savePresetsToProfile(Array.isArray(profile.customActions) ? profile.customActions : [], next)
+        if (saved?.ok) setNewLoop({ editingId: '', label: '', steps: [], intervalSec: 8, targets: [] })
       }
 
       const renderActionTab = () => {
-        const target = instances.find((item) => item.id === actionTargetId) || instances[0] || null
+        const target = instances.find((item) => profileInstanceIds.includes(item.id)) || instances[0] || null
         if (!target) return h('p', { style: S.warn }, '还没有模型实例（宿主可能是旧版本：重启 DSH）')
-        const draft = draftOf(target.id) || {}
-        const customActions = Array.isArray(draft.customActions) ? draft.customActions : []
-        const sequences = Array.isArray(draft.presetSequencesRaw) ? draft.presetSequencesRaw : []
-        const allActions = [
-          ...BUILTIN_ACTIONS.map((item) => ({ id: item.id, label: item.label })),
-          ...customActions.map((item) => ({ id: item.id, label: item.label || item.id })),
+        // 动作/循环住在「模型档案」里：同一模型共用一个档案，不同模型各用各的
+        const customActions = Array.isArray(profile?.customActions) ? profile.customActions : []
+        // 0.4.0：按这只模型真实能力挑出来的默认动作（宿主在窗口上报参数后自动生成）
+        const autoActions = Array.isArray(profile?.autoActions) ? profile.autoActions : []
+        // 0.5.0：扫模型目录得到的表情 / 换装 / 手势（hold 类，点一次开、再点一次关）
+        const capabilityActions = Array.isArray(profile?.capabilityActions) ? profile.capabilityActions : []
+        const capabilities = profile?.capabilities ?? null
+        const capGroups = capabilityActions.reduce((acc, item) => {
+          const key = item.group === 'clothes' ? 'clothes' : item.group === 'gesture' ? 'gesture' : item.group === 'face' ? 'face' : 'other'
+          ;(acc[key] ??= []).push(item)
+          return acc
+        }, {})
+        const sequences = Array.isArray(profile?.presetSequences) ? profile.presetSequences : []
+        const activeProfiles = profiles.filter((item) => item.inUse)
+        const historyProfiles = profiles.filter((item) => !item.inUse)
+        const customIds = new Set(customActions.map((item) => item.id))
+        // 循环候选同样不再包含写死的内置动作；同 ID 自定义动作覆盖默认动作。
+        const loopActions = new Map()
+        for (const item of autoActions) {
+          if (!customIds.has(item.id)) loopActions.set(item.id, { id: item.id, label: `[默认] ${item.label || item.id}` })
+        }
+        for (const item of capabilityActions) {
+          if (!customIds.has(item.id)) loopActions.set(item.id, { id: item.id, label: `[模型] ${item.label || item.id}` })
+        }
+        for (const item of customActions) loopActions.set(item.id, { id: item.id, label: `[自定义] ${item.label || item.id}` })
+        const allActions = [...loopActions.values()]
+        const adjustableActions = [
+          ...autoActions
+            .filter((item) => !customIds.has(item.id))
+            .map((item) => ({ key: `default:${item.id}`, kind: 'default', action: item, label: `默认 · ${item.label || item.id}` })),
+          ...customActions.map((item) => ({ key: `custom:${item.id}`, kind: 'custom', action: item, label: `自定义 · ${item.label || item.id}` })),
         ]
+        const selectedAdjust = adjustableActions.find((item) => item.key === actionAdjust.actionKey) || null
         return h(
           'div',
           null,
-          h('p', { style: S.hint }, '动作与循环默认对所有模型生效；循环可以在下面单独选「播放到哪些模型」。'),
+          // 档案选择器（历史档案可以在这里重新选/改名/删除）
+          h(
+            'div',
+            { style: { ...S.card, marginBottom: 12 } },
+            h('p', { style: S.sub }, '当前动作档案'),
+            h(
+              'div',
+              { style: S.row },
+              h('select', {
+                style: { ...S.input, flex: '1 1 220px' },
+                value: activeProfileId,
+                onChange: (event) => setActiveProfileId(event.target.value),
+              },
+              ...(activeProfiles.length ? activeProfiles : profiles).map((item) => h(
+                'option', { key: item.id, value: item.id },
+                `${item.label || item.id}${item.inUse ? '' : '（历史）'}${item.boundInstanceIds?.length ? ` · ${item.boundInstanceIds.map((id) => instanceTitleOf(id)).join(' + ')}` : ''}`,
+              ))),
+              h('button', {
+                type: 'button', style: S.miniBtn, onClick: () => setHistoryOpen((value) => !value),
+              }, historyOpen ? '收起历史' : `历史档案（${historyProfiles.length}）`),
+            ),
+            h('p', { style: S.hint }, activeProfiles.length
+              ? '同一只模型共用一份动作/循环；换了模型路径会新建一份档案。'
+              : '还没有绑定模型的活动档案；下面看到的是历史档案里的内容。'),
+            activeProfileId
+              ? h('div', { style: { ...S.row, marginTop: 6 } },
+                h('input', {
+                  style: { ...S.input, flex: '1 1 160px' },
+                  value: profile?.label || '', placeholder: '档案名',
+                  onChange: (event) => setProfileDetail((current) => (current?.profile
+                    ? { ...current, profile: { ...current.profile, label: event.target.value } }
+                    : current)),
+                }),
+                h('button', {
+                  type: 'button', style: S.miniBtn,
+                  onClick: () => patchActiveProfile({ label: profile?.label || '' }),
+                }, '改名'),
+                h('button', {
+                  type: 'button', style: S.miniBtn,
+                  onClick: async () => {
+                    if (!window.confirm('删除这个模型档案？里面的自定义动作和循环会一起删掉。')) return
+                    const result = await call(`/profiles/${encodeURIComponent(activeProfileId)}?force=1`, { method: 'DELETE' })
+                    setNotice(result?.ok ? { kind: 'ok', text: '档案已删除' } : { kind: 'warn', text: result?.error || '删除失败' })
+                    setProfileTick((value) => value + 1)
+                    await load()
+                  },
+                }, '删除档案'),
+              )
+              : null,
+            historyOpen && historyProfiles.length
+              ? h('div', { style: { marginTop: 8 } },
+                ...historyProfiles.map((item) => h('div', { key: item.id, style: { ...S.row, marginTop: 4 } },
+                  h('span', { style: { ...S.hint, flex: '1 1 auto' } }, `${item.label || item.id} · ${item.pathKey}`),
+                  h('button', { type: 'button', style: S.miniBtn, onClick: () => { setActiveProfileId(item.id); setHistoryOpen(false) } }, '查看'),
+                )))
+              : null,
+          ),
+          h('p', { style: S.hint }, '动作与循环只对「当前档案」那只模型生效。'),
 
           h('p', { style: S.sub }, '默认动作'),
+          h('p', { style: S.hint }, autoActions.length
+            ? `按这只模型真实参数生成（${autoActions.length} 个），点一下就能做出来。`
+            : '还没生成：模型窗口加载完成后会自动生成，也可以点「重新生成」。'),
           h(
             'div',
             { style: { ...S.row, flexWrap: 'wrap' } },
-            ...BUILTIN_ACTIONS.map((item) => h(
-              'button',
-              {
+            h('button', {
+              type: 'button', style: S.miniBtn,
+              disabled: busy === 'auto-actions' || !activeProfileId,
+              onClick: regenerateAutoActions,
+            }, busy === 'auto-actions' ? '生成中…' : '重新生成'),
+            ...autoActions.map((item) => h('button', {
+              key: item.id, type: 'button', style: S.btn,
+              disabled: busy.startsWith('anim:'),
+              title: Array.isArray(item.tracks) && item.tracks.length
+                ? `参数：${item.tracks.map((track) => track.param).join(' / ')}`
+                : '',
+              onClick: () => anim(target.id, item.id),
+            }, item.label || item.id)),
+          ),
+          h('p', { style: { ...S.sub, marginTop: 12 } }, '表情 / 换装（模型自带）'),
+          capabilities
+            ? h('p', { style: S.hint }, `从模型包扫到 ${capabilities.expressions.length} 个表情/换装，${capabilityActions.length} 个能直接用（点一次开，再点一次关）。` +
+              (capabilities.motions.length ? ` 另有 ${capabilities.motions.length} 个动画文件（model3.json 没登记，暂不播）：${capabilities.motions.slice(0, 4).map((item) => item.label).join('、')}${capabilities.motions.length > 4 ? '…' : ''}` : ''))
+            : h('p', { style: S.hint }, '还没扫描模型包：点一次上面「重新生成」，会同时扫 Exp3/Animation 目录。'),
+          ...['clothes', 'face', 'gesture', 'other'].map((key) => {
+            const list = capGroups[key] ?? []
+            if (!list.length) return null
+            const label = key === 'clothes' ? '换装' : key === 'face' ? '表情' : key === 'gesture' ? '手势' : '其它'
+            return h('div', { key, style: { ...S.row, flexWrap: 'wrap', marginTop: 4 } },
+              h('span', { style: S.dim }, `${label}：`),
+              ...list.map((item) => h('button', {
                 key: item.id, type: 'button', style: S.btn,
                 disabled: busy.startsWith('anim:'),
+                title: item.desc || (Array.isArray(item.tracks) ? `参数：${item.tracks.map((track) => track.param).join(' / ')}` : ''),
                 onClick: () => anim(target.id, item.id),
-              },
-              item.label,
-            )),
-          ),
+              }, item.label || item.id)))
+          }),
+          h('p', { style: { ...S.sub, marginTop: 12 } }, '自定义动作'),
+          h('p', { style: S.hint }, '这里放你和 AI 为当前模型设计的动作。默认动作也可以调整：AI 会保存一个同 ID 的自定义覆盖版本，模型参数重新生成时不会弄丢。'),
+          h('p', { style: S.warn }, '注意：让 AI 新增或调整自定义动作会调用模型，消耗 Token。'),
           customActions.length
             ? h('div', { style: { ...S.row, flexWrap: 'wrap', marginTop: 6 } },
-              h('span', { style: S.dim }, '自定义：'),
               ...customActions.map((item) => h('button', {
                 key: item.id, type: 'button', style: S.btn,
+                title: `ID：${item.id} · ${item.durationMs || 0}ms`,
                 disabled: busy.startsWith('anim:'),
                 onClick: () => anim(target.id, item.id),
               }, item.label || item.id)))
-            : null,
+            : h('p', { style: S.dim }, '还没有自定义动作。'),
+
+          h(
+            'div',
+            { style: { ...S.card, marginTop: 12 } },
+            h('p', { style: S.sub }, '动作调整框'),
+            h('p', { style: S.hint }, '选择默认动作或自定义动作，再用固定选项或自由描述告诉 AI 怎么改。默认动作会生成同 ID 覆盖层，不改动自动生成的原定义。'),
+            h('p', { style: S.warn }, '每次发送都会调用 AI，消耗 Token。'),
+            h(Field, { label: '选择要调整的动作' },
+              h('select', {
+                style: S.select,
+                value: actionAdjust.actionKey,
+                disabled: !adjustableActions.length || busy === 'action-adjust',
+                onChange: (event) => setActionAdjust((current) => ({ ...current, actionKey: event.target.value })),
+              },
+              h('option', { value: '' }, adjustableActions.length ? '（选择动作）' : '（暂无可调整动作）'),
+              ...adjustableActions.map((item) => h('option', { key: item.key, value: item.key }, item.label)))),
+            h(Field, { label: '动作幅度' },
+              h('select', {
+                style: S.select,
+                value: actionAdjust.amplitude,
+                onChange: (event) => setActionAdjust((current) => ({ ...current, amplitude: event.target.value })),
+              },
+              h('option', { value: '' }, '不调整'),
+              ...ACTION_ADJUST_OPTIONS.amplitude.map((value) => h('option', { key: value, value }, value)))),
+            h(Field, { label: '动作频率' },
+              h('select', {
+                style: S.select,
+                value: actionAdjust.frequency,
+                onChange: (event) => setActionAdjust((current) => ({ ...current, frequency: event.target.value })),
+              },
+              h('option', { value: '' }, '不调整'),
+              ...ACTION_ADJUST_OPTIONS.frequency.map((value) => h('option', { key: value, value }, value)))),
+            h(Field, { label: '动作时间' },
+              h('select', {
+                style: S.select,
+                value: actionAdjust.duration,
+                onChange: (event) => setActionAdjust((current) => ({ ...current, duration: event.target.value })),
+              },
+              h('option', { value: '' }, '不调整'),
+              ...ACTION_ADJUST_OPTIONS.duration.map((value) => h('option', { key: value, value }, value)))),
+            h(Field, { label: '其它调整', hint: '可以描述生活化、幅度曲线、停顿、左右方向或具体效果；AI 会先查当前模型参数再保存。' },
+              h('textarea', {
+                style: { ...S.input, minHeight: 58 },
+                rows: 3,
+                value: actionAdjust.note,
+                placeholder: '例如：开头停半拍，再慢慢低头；只动头和眼睛，不要让身体位移',
+                onChange: (event) => setActionAdjust((current) => ({ ...current, note: event.target.value })),
+              })),
+            h('div', { style: S.row },
+              h('button', {
+                type: 'button',
+                style: S.primary,
+                disabled: !selectedAdjust || busy === 'action-adjust',
+                onClick: () => selectedAdjust && sendActionAdjustment(selectedAdjust.action, selectedAdjust.kind),
+              }, busy === 'action-adjust' ? '发送中…' : '发给 AI 调整'),
+              selectedAdjust
+                ? h('span', { style: S.dim }, `将调整「${selectedAdjust.action.label || selectedAdjust.action.id}」；${selectedAdjust.kind === 'default' ? '会保存为同 ID 自定义覆盖层' : '会覆盖同名自定义动作'}`)
+                : null),
+          ),
 
           h(
             'div',
             { style: { ...S.card, marginTop: 12 } },
             h('p', { style: S.sub }, '新增动作'),
+            h('p', { style: S.warn }, '让 AI 设计自定义动作会消耗 Token；下面的「生成」只使用本地模板草稿，不调用模型。'),
             h(Field, { label: '动作名' },
               h('input', {
                 style: S.input, value: newAction.label, placeholder: '例如：得意',
@@ -1157,17 +1758,20 @@ window.__ModuleLoader__.load({
                 { key: seq.id, style: { ...S.row, marginTop: 4, flexWrap: 'wrap' } },
                 h('span', { style: S.dim },
                   `${seq.label || seq.id} · ${Array.isArray(seq.steps) ? seq.steps.length : 0} 步 · ${Math.round((Number(seq.intervalMs) || 3000) / 1000)}s` +
-                  (Array.isArray(seq.targets) && seq.targets.length
-                    ? ` · 绑定 ${seq.targets.map((id) => instanceTitleOf(id)).join(' + ')}`
-                    : ' · 跟随当前模型')),
+                  (Array.isArray(seq.legacyTargets) && seq.legacyTargets.length
+                    ? ` · 旧绑定 ${seq.legacyTargets.map((id) => instanceTitleOf(id)).join(' + ')}（已按模型档案共享）`
+                    : '')),
                 h('button', {
                   type: 'button',
                   style: S.btn,
                   onClick: () => {
-                    // 绑定了多模型就都启起来（同一个循环在两台模型上各跑一遍）
-                    // 勾了播放模型就只播那几个；没勾 = 所有模型都跑
-                    const targets = Array.isArray(seq.targets) && seq.targets.length ? seq.targets : instances.map((item) => item.id)
-                    targets.forEach((id) => presetOp(id, 'start', seq.id))
+                    // 循环属于模型档案：只在该档案绑定的实例上启动；没有活动实例就提示
+                    const ids = profileInstanceIds.length ? profileInstanceIds : []
+                    if (!ids.length) {
+                      setNotice({ kind: 'warn', text: '这只模型现在没有打开窗口，先打开窗口再启用循环' })
+                      return
+                    }
+                    ids.forEach((id) => presetOp(id, 'start', seq.id))
                   },
                 }, '启用'),
                 h('button', { type: 'button', style: S.btn, onClick: () => previewLoop(seq) }, '预览'),
@@ -1179,7 +1783,7 @@ window.__ModuleLoader__.load({
               type: 'button',
               style: S.btn,
               // 循环可能同时跑在多台模型上：停止要对所有实例发一遍，只停一台会「关不掉」
-              onClick: () => instances.forEach((item) => presetOp(item.id, 'stop')),
+              onClick: () => (profileInstanceIds.length ? profileInstanceIds : instances.map((item) => item.id)).forEach((id) => presetOp(id, 'stop')),
             }, '停止循环'),
             h('p', { style: { ...S.sub, marginTop: 10 } }, newLoop.editingId ? '修改循环' : '新建循环'),
             h(Field, { label: '名称' },
@@ -1194,20 +1798,8 @@ window.__ModuleLoader__.load({
                   onChange: () => toggleNewLoopStep(item.id),
                 }),
                 h('span', { style: S.dim }, item.label)))),
-            h(Field, { label: '绑定模型', hint: '不勾 = 只跟随当前模型；勾两个 = 两台模型同时跑这个循环（最多 2 个）' },
-              h('div', { style: { ...S.row, flexWrap: 'wrap' } },
-                ...instances.map((inst) => h('label', { key: inst.id, style: { ...S.row, gap: 4 } },
-                  h('input', {
-                    type: 'checkbox',
-                    checked: (newLoop.targets || []).includes(inst.id),
-                    onChange: () => setNewLoop((current) => {
-                      const list = current.targets || []
-                      const next = list.includes(inst.id) ? list.filter((item) => item !== inst.id) : [...list, inst.id].slice(0, 2)
-                      return { ...current, targets: next }
-                    }),
-                  }),
-                  h('span', { style: S.dim }, instanceTitleOf(inst.id)))))),
-            h(Field, { label: '间隔 秒', hint: '两个动作之间停多久（0.3~60s）' },
+            h(Field, { label: '作用范围', hint: `当前档案「${profile?.label || activeProfileId || '—'}」绑定的模型：${profileInstanceIds.length ? profileInstanceIds.map((id) => instanceTitleOf(id)).join(' + ') : '（没有活动实例，只保存定义）'}` },
+              h('span', { style: S.dim }, '循环属于模型档案，不再单独选模型')),            h(Field, { label: '间隔 秒', hint: '两个动作之间停多久（0.3~60s）' },
               h('input', {
                 style: S.num, type: 'number', min: '0.3', max: '60', step: '0.5',
                 value: newLoop.intervalSec,
@@ -1255,7 +1847,8 @@ window.__ModuleLoader__.load({
         // 参数输入：失焦时提交（避免边打字边 PATCH）；opts.ms = 配置存毫秒、界面按秒显示
         const num = (key, min, max, step, unit, opts = {}) => {
           const raw = Number(cfg[key])
-          const shown = Number.isFinite(raw) ? (opts.ms ? raw / 1000 : raw) : ''
+          const scale = Number(opts.scale) || (opts.ms ? 1000 : 1)
+          const shown = Number.isFinite(raw) ? raw / scale : ''
           return h(
             'label',
             { style: { ...S.row, gap: 6, marginLeft: 10 }, key: `${target.id}:${key}:${shown}` },
@@ -1265,7 +1858,7 @@ window.__ModuleLoader__.load({
               onBlur: (event) => {
                 const value = Number(event.target.value)
                 if (!Number.isFinite(value)) return
-                const next = opts.ms ? Math.round(value * 1000) : value
+                const next = Math.round(value * scale)
                 if (Number.isFinite(raw) && next === raw) return
                 patchInstancePart(target.id, { [key]: next })
               },
@@ -1273,6 +1866,21 @@ window.__ModuleLoader__.load({
             h('span', { style: S.dim }, unit),
           )
         }
+        const clock = (key, label) => h(
+          'label',
+          { style: { ...S.row, gap: 6, marginLeft: 10 }, key: `${target.id}:${key}:${cfg[key] ?? ''}` },
+          h('span', { style: S.dim }, label),
+          h('input', {
+            style: { ...S.num, width: 78 },
+            type: 'time',
+            defaultValue: String(cfg[key] ?? (key === 'eventQuietStart' ? '23:00' : '08:00')),
+            disabled: busy === `patch:${target.id}`,
+            onBlur: (event) => {
+              const value = String(event.target.value || '')
+              if (/^([01]\d|2[0-3]):[0-5]\d$/.test(value) && value !== cfg[key]) patchInstancePart(target.id, { [key]: value })
+            },
+          }),
+        )
         const group = (title, hint, children) => h(
           'div',
           { style: { ...S.card, marginTop: 10 } },
@@ -1280,14 +1888,27 @@ window.__ModuleLoader__.load({
           h('p', { style: { ...S.hint, marginTop: 2 } }, hint),
           ...children,
         )
+        const disclosureGroup = (title, hint, open, children) => h(
+          'details',
+          { style: { ...S.card, marginTop: 10 }, open: open ? true : undefined },
+          h('summary', { style: { ...S.sub, cursor: 'pointer' } }, title),
+          h('p', { style: { ...S.hint, marginTop: 2 } }, hint),
+          ...children,
+        )
+        const proactiveDriver = ['off', 'timer', 'event'].includes(cfg.wakeDriver)
+          ? cfg.wakeDriver
+          : (cfg.eventWakeEnabled === true ? 'event' : cfg.wakeEnabled === true ? 'timer' : 'off')
         const enableAll = () => patchInstancePart(target.id, {
           screenReadEnabled: true,
           screenCaptureEnabled: true,
           wakeCaptureEnabled: true,
-          wakeEnabled: true,
+          wakeDriver: 'timer',
+          lifeEnabled: true,
+          lifeNonverbalEnabled: true,
+          lifeFarewellEnabled: true,
           aiMoveEnabled: true,
         })
-        const allOff = cfg.screenReadEnabled !== true || cfg.screenCaptureEnabled !== true || cfg.wakeEnabled !== true
+        const allOff = cfg.screenReadEnabled !== true || cfg.screenCaptureEnabled !== true || proactiveDriver === 'off' || cfg.lifeEnabled === false
         return h(
           'div',
           {},
@@ -1301,12 +1922,33 @@ window.__ModuleLoader__.load({
                 onChange: (event) => setActionTargetId(event.target.value),
               }, ...instances.map((inst) => h('option', { key: inst.id, value: inst.id }, instanceTitleOf(inst.id))))),
             h('p', { style: { ...S.hint, marginTop: 6 } }, `当前模式：${current}（在窗口工具栏或「模型」页切换）`),
+            target.life
+              ? h('p', { style: { ...S.hint, marginTop: 4 } },
+                `陪伴状态：${target.life.attention || '未知'} · 意愿 ${target.life.willingness || 'social'} · 精力 ${Math.round(Number(target.life.energy) * 100)}% · 心情 ${Number(target.life.mood).toFixed(2)} · 今日分享 ${target.life.dailyShare}/${target.life.dailyShareMax}`)
+              : null,
             h('div', { style: { ...S.row, marginTop: 8, flexWrap: 'wrap', gap: 8 } },
               h('button', { type: 'button', style: S.primary, disabled: busy === `patch:${target.id}`, onClick: enableAll }, '一键开启模式所需开关'),
               allOff ? h('span', { style: S.warn }, '当前有开关是关的，模式会「看起来没区别」') : null),
             h('p', { style: { ...S.hint, marginTop: 6 } }, '说明：这些开关默认已开（0.13.9 起）；关掉后对应模式的能力会失效，按需逐个关。'),
           ),
-          group('手动', '不主动：只有你点 ⚡ 或摸模型才回应。这里的读屏/截图也是 ⚡ 唤醒时用的。', [
+          group('共享 · 不消耗 Token', '启用后由「手动 / AI 半自动 / AI 自动」三种模式共享：只看状态并做静默反应，不调用模型。', [
+            h(Field, { label: '生命感循环', hint: '关闭后不计算陪伴状态，也不做静默回应。' }, toggle('lifeEnabled')),
+            h(Field, { label: '静默非语言回应', hint: '回来、专注、应用切换、长时间独处时，自动看向/点头/眨眼，不发气泡。' },
+              toggle('lifeNonverbalEnabled'), num('lifeNonverbalCooldownMs', 3, 300, 1, '秒冷却', { ms: true })),
+            h(Field, { label: '观众在场判断', hint: '你离开或长时间无输入时，不再对着空气做大幅动作，只保留呼吸和少量眨眼。' },
+              toggle('audienceAwareEnabled')),
+            h(Field, { label: '双模型关系互动', hint: '摸其中一个模型时，另一个可能看过来、点头或吃醋；不调用 AI。' },
+              toggle('dualRelationEnabled')),
+            h(Field, { label: '事件判断阈值', hint: '这些只决定宿主何时观察到“离开 / 专注 / 应用切换”，读取窗口标题本身不经过 AI，不消耗 Token。' },
+              num('eventWakeFocusMs', 1, 120, 1, '分钟专注', { scale: 60000 }),
+              num('eventWakeAwayMs', 1, 120, 1, '分钟离开', { scale: 60000 }),
+              num('eventWakeTitleIntervalMs', 10, 300, 5, '秒读标题', { ms: true })),
+            h(Field, { label: '陪伴记忆', hint: '按当前对话隔离，不跨会话。代码默认开启；已有安装首次升级会默认关闭，避免和鱼记忆/喵记忆重复。' },
+              toggle('memoryEnabled'), num('memoryMaxEntries', 20, 500, 10, '条上限')),
+            h(MemoryPanel, { instanceId: target.id, sessionId: cfg.sessionId || '', enabled: cfg.memoryEnabled === true }),
+            h(Field, { label: '停机告别', hint: '窗口关闭、模型停用或插件卸载时，先显示一句本地告别再退出。' }, toggle('lifeFarewellEnabled')),
+          ]),
+          group('手动', `内部模式 auto。只有你点 ⚡ 或摸模型才与 AI 交互；不消耗 Token 的共享陪伴行为仍可运行。`, [
             h(Field, { label: '读屏 · 前台标题', hint: '只读当前窗口标题（不截图），用来说明你在什么软件里。数字是读取间隔；⚡ 唤醒每次都会现读一次，不需要定时。' },
               toggle('screenReadEnabled'), num('screenWatchIntervalMs', 15, 300, 15, '秒一次', { ms: true })),
             h(Field, { label: '允许截图', hint: '开启后 ⚡ / 定时唤醒可以截一张全屏（可能含别的窗口，注意隐私）；这是总开关，关掉后「唤醒时截图」也不生效' },
@@ -1315,12 +1957,34 @@ window.__ModuleLoader__.load({
             h(Field, { label: '点模型有反应' }, toggle('autoInteract')),
             h(Field, { label: '空闲小动作', hint: '闲着时随机眨眼/歪头' }, toggle('idlePresets')),
           ]),
-          group('AI 半自动', '自动上气泡 + 思考/回答时自动做动作，并按间隔主动唤醒。', [
-            h(Field, { label: '定时唤醒', hint: '关掉时半自动只剩「上气泡」，不会主动看你' },
-              toggle('wakeEnabled'), num('wakeIntervalMs', 15, 600, 5, '秒一次', { ms: true }), num('wakeMaxPerHour', 1, 360, 10, '次/滚动小时')),
+          group('AI 半自动 / AI 自动 · 消耗 Token 的主动感知', '两种 AI 模式共用的主动说话方式。只能选择「定时唤醒」或「事件唤醒」之一；切换模式不会自动打开它，仍由下面单独控制。', [
+            h(Field, { label: '主动感知方式', hint: '关闭 = 不主动调用 AI；定时 = 每隔一段时间看一眼；事件 = 回来或专注达到阈值时才看一眼。按钮 ⚡ 随时仍可使用。' },
+              h('select', {
+                style: S.select,
+                value: proactiveDriver,
+                disabled: busy === `patch:${target.id}`,
+                onChange: (event) => patchInstancePart(target.id, { wakeDriver: event.target.value }),
+              },
+              h('option', { value: 'off' }, '关闭'),
+              h('option', { value: 'timer' }, '定时唤醒'),
+              h('option', { value: 'event' }, '事件唤醒'))),
             h(Field, { label: '唤醒时截图', hint: '关 = 只读窗口标题；开 = 唤醒时截一张一起给我看' }, toggle('wakeCaptureEnabled')),
+            disclosureGroup('定时唤醒设置', '只有主动感知方式选择“定时唤醒”时才会运行。', proactiveDriver === 'timer', [
+              h(Field, { label: '定时间隔与额度' }, 
+                num('wakeIntervalMs', 15, 600, 5, '秒一次', { ms: true }),
+                num('wakeMaxPerHour', 1, 360, 10, '次/滚动小时')),
+            ]),
+            disclosureGroup('事件唤醒设置', '只有主动感知方式选择“事件唤醒”时才会运行。未启用事件唤醒时这里默认收起。', proactiveDriver === 'event', [
+              h(Field, { label: '打断额度', hint: '分享额度每天 5 次、重要消息每天 3 次，跨天静默归零；连续主动说话没有用户回应时会自动收敛。' },
+                num('eventWakeCooldownMs', 30, 3600, 30, '秒冷却', { ms: true }),
+                num('eventWakeMaxPerHour', 1, 120, 1, '次/小时'),
+                num('lifeShareBudgetPerDay', 0, 50, 1, '次分享/天'),
+                num('lifeImportantBudgetPerDay', 0, 30, 1, '次重要/天')),
+              h(Field, { label: '静默时段', hint: '静默时段只保留非语言回应，不主动说话。支持跨午夜。' },
+                toggle('eventQuietEnabled'), clock('eventQuietStart', '从'), clock('eventQuietEnd', '到')),
+            ]),
           ]),
-          group('AI 自动', '在半自动基础上，AI 还能自己移动/缩放窗口（会保证工具栏留在屏内、单次不超半屏）。', [
+          group('AI 自动 · 窗口控制', '内部模式 manual。除 AI 半自动的能力外，AI 还能自己移动/缩放窗口（会保证工具栏留在屏内、单次不超半屏）。', [
             h(Field, { label: '交给 AI 移动窗口' }, toggle('aiMoveEnabled')),
           ]),
         )
@@ -1459,6 +2123,15 @@ window.__ModuleLoader__.load({
           ctx.slots.register(
             { name: 'plugins.tab', id: 'live2d', order: 57, label: 'Live2D' },
             Live2DSettings,
+          ),
+        )
+
+        // DSH 对话输入框下方、权限/Plan 之后的可追加区域。
+        // conversation.input.permission 是 single 槽，追加注册会把权限插件挤掉。
+        ctx.slots.inject('conversation.input.left', () =>
+          ctx.slots.register(
+            { name: 'conversation.input.left', id: 'live2d-quick-toggle', order: 58 },
+            Live2DQuickButtons,
           ),
         )
       },

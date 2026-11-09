@@ -187,6 +187,13 @@
     box-shadow: 0 10px 26px rgba(8, 12, 24, .55);
   }
   #mode-menu { z-index: 62; min-width: 132px; }
+  #preset-menu {
+    overflow: visible;
+    width: var(--preset-root-width, 170px);
+    min-width: 0;
+    max-width: none;
+    box-sizing: border-box;
+  }
   #preset-menu.hidden,
   #mode-menu.hidden { display: none; }
   #preset-menu .menu-title,
@@ -205,6 +212,13 @@
     justify-content: space-between;
     gap: 8px;
   }
+  #preset-menu .menu-item > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #preset-menu .menu-item .tag { flex: 0 0 auto; }
   #preset-menu .menu-item:hover,
   #mode-menu .menu-item:hover { background: rgba(96, 140, 255, .35); }
   #mode-menu .menu-item.chosen { color: #9fc2ff; }
@@ -212,6 +226,67 @@
   #mode-menu .menu-item .tag { opacity: .55; font-size: 10px; }
   #preset-menu .menu-sep,
   #mode-menu .menu-sep { height: 1px; margin: 4px 6px; background: rgba(140, 170, 230, .22); }
+  /* 右键只显示「动作 / 循环 / 状态」三个大类，悬停后再展开二级菜单。 */
+  #preset-menu .menu-group { position: relative; }
+  #preset-menu .menu-parent .arrow {
+    opacity: .7;
+    font-size: 13px;
+    transform: translateX(2px);
+  }
+  #preset-menu .submenu {
+    position: fixed;
+    z-index: 63;
+    display: none;
+    box-sizing: border-box;
+    width: var(--preset-pane-width, 190px);
+    min-width: 0;
+    max-width: none;
+    max-height: calc(100vh - 12px);
+    overflow-y: auto;
+    padding: 6px;
+    border-radius: 10px;
+    border: 1px solid rgba(120, 150, 220, .45);
+    background: rgba(24, 30, 48, .985);
+    box-shadow: 0 12px 30px rgba(8, 12, 24, .62);
+  }
+  /* 8px 透明桥接，避免鼠标从大类掠过 4px 间隙时菜单闪退。 */
+  #preset-menu .menu-group > .submenu::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -8px;
+    width: 8px;
+  }
+  #preset-menu .menu-group.submenu-open > .submenu { display: block; }
+  /* 一、二、三级各占独立列。三列宽度在打开菜单时按窗口宽度统一计算，
+     因此小窗口也能横向排开而不互相覆盖。 */
+  #preset-menu .menu-subgroup {
+    margin-top: 2px;
+    border-top: 1px solid rgba(140, 170, 230, .12);
+  }
+  #preset-menu .menu-subgroup > .submenu {
+    z-index: 64;
+    max-height: calc(100vh - 12px);
+    padding: 6px;
+    border-color: rgba(120, 150, 220, .28);
+    background: rgba(18, 24, 40, .992);
+    box-shadow: 0 12px 30px rgba(8, 12, 24, .62);
+  }
+  #preset-menu .menu-subgroup.submenu-open > .submenu { display: block; }
+  #preset-menu .menu-subgroup > .menu-parent {
+    font-weight: 600;
+    color: #dce8ff;
+  }
+  #preset-menu .menu-status {
+    display: grid;
+    grid-template-columns: 82px minmax(0, 1fr);
+    align-items: start;
+    cursor: default;
+  }
+  #preset-menu .menu-status:hover { background: rgba(96, 140, 255, .18); }
+  #preset-menu .menu-status .status-key { opacity: .58; }
+  #preset-menu .menu-status .status-value { text-align: right; }
 
   /* --- 阶段 2：窗口内对话 --- */
   /* 底边固定在「模型顶部 + 6px」：短回答贴底，长回答向上长，永远不压模型。
@@ -343,6 +418,77 @@
     background: rgba(30, 38, 62, var(--reply-opacity, .9));
     color: #f2f6ff;
     box-shadow: 0 8px 22px rgba(12, 18, 36, .35);
+  }
+  /* 气泡外观：由设置页写入 bubbleSkin，长文滚动与 Markdown 规则完全复用。 */
+  .reply-item.bubble-style.skin-cloud {
+    position: relative;
+    padding: 12px 16px;
+    border-radius: 26px 30px 24px 28px;
+    border-color: rgba(174, 205, 245, .72);
+    background: rgba(248, 252, 255, var(--reply-opacity, .94));
+    color: #26344f;
+    box-shadow:
+      0 10px 26px rgba(30, 58, 105, .2),
+      inset 0 1px 0 rgba(255, 255, 255, .9);
+  }
+  .reply-item.bubble-style.skin-cloud::after {
+    content: '';
+    position: absolute;
+    pointer-events: none;
+    left: 15px;
+    bottom: 4px;
+    width: 9px;
+    height: 7px;
+    border-radius: 50%;
+    background: rgba(248, 252, 255, var(--reply-opacity, .94));
+    box-shadow: 9px 2px 0 rgba(220, 236, 253, var(--reply-opacity, .86));
+  }
+  .reply-item.bubble-style.skin-signboard {
+    position: relative;
+    max-width: 90%;
+    padding: 11px 15px;
+    border: 3px solid rgba(133, 87, 43, var(--reply-opacity, .94));
+    border-radius: 5px;
+    background:
+      linear-gradient(90deg, rgba(255,255,255,.2), transparent 16%, transparent 84%, rgba(96,57,23,.08)),
+      rgba(244, 222, 174, var(--reply-opacity, .95));
+    color: #3d2918;
+    box-shadow: 0 9px 20px rgba(48, 27, 10, .3), inset 0 0 0 1px rgba(255,255,255,.45);
+  }
+  .reply-item.bubble-style.skin-signboard::after {
+    content: '';
+    position: absolute;
+    pointer-events: none;
+    left: 34px;
+    bottom: 4px;
+    width: 4px;
+    height: 6px;
+    background: rgba(133, 87, 43, var(--reply-opacity, .94));
+    box-shadow: 18px 0 0 rgba(133, 87, 43, var(--reply-opacity, .94));
+  }
+  .reply-item.bubble-style.skin-note {
+    position: relative;
+    padding: 11px 15px;
+    border: 1px solid rgba(211, 184, 97, .72);
+    border-radius: 7px 12px 6px 10px;
+    background:
+      repeating-linear-gradient(to bottom, transparent 0 21px, rgba(118, 151, 195, .13) 21px 22px),
+      rgba(255, 251, 220, var(--reply-opacity, .95));
+    color: #38404b;
+    box-shadow: 5px 8px 18px rgba(44, 42, 30, .2);
+    transform: rotate(-.25deg);
+  }
+  .reply-item.bubble-style.skin-note::after {
+    content: '';
+    position: absolute;
+    pointer-events: none;
+    right: 18px;
+    bottom: 4px;
+    width: 9px;
+    height: 9px;
+    background: rgba(255, 251, 220, var(--reply-opacity, .95));
+    border: 1px solid rgba(211, 184, 97, .62);
+    transform: rotate(45deg);
   }
   .reply-item.leaving { opacity: 0; transition: opacity .26s ease; }
   /* 「↕ 还有约 N 字」：sticky 在 #reply 底部（滚动容器内唯一来源），不随内容滚走 */

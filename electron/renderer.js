@@ -34,8 +34,10 @@ const settings = {
   rendererEnabled: true,
   adjustMode: false,
   replyStyle: 'bubble',
+  bubbleSkin: 'classic',
   // 预设动作（宿主下发）：{ actions: [...], sequences: [...], activeSequence }
   presets: { actions: [], sequences: [], activeSequence: null },
+  presetsSignature: '',
   chatTimeoutMs: 90000,
   replyFontSize: 15,
   replyMaxHeightPct: 45,
@@ -56,8 +58,11 @@ const settings = {
   autoInteract: true,
   // 0.13.0：模式（manual/semi/auto）与主动唤醒状态
   mode: 'auto',
+  wakeDriver: 'off',
   wakeEnabled: false,
+  eventWakeEnabled: false,
   wakeBusy: false,
+  life: null,
   // 置顶状态（工具栏 📌 的 active 常亮由它驱动）
   pinned: true,
 }
@@ -66,6 +71,9 @@ const settings = {
 let pointer = { x: 0, y: 0, at: 0 }
 let baseModelY = 0
 let look = { x: 0, y: 0 }
+let gazeMode = 'cursor'
+let gazeUntil = 0
+let gazeTarget = null
 let inertiaAngle = 0
 let dragVelocity = 0
 let lastDragMoveAt = 0
@@ -114,7 +122,21 @@ function applyMotionParams(core) {
   const k = motionK()
   let tx = 0
   let ty = 0
-  if (settings.lookFollow && pointer.at && now - pointer.at < 4000 && model) {
+  const forced = now < gazeUntil ? gazeMode : 'cursor'
+  if (settings.lookFollow && model && forced === 'user') {
+    tx = 0
+    ty = 0
+  } else if (settings.lookFollow && model && forced === 'peer' && gazeTarget) {
+    const w = model.width || 300
+    const h = model.height || 400
+    const cx = model.x + w / 2
+    const cy = model.y + h * 0.16
+    tx = clampNum((Number(gazeTarget.x) - cx) / Math.max(80, w * 0.8), -1, 1)
+    ty = clampNum((Number(gazeTarget.y) - cy) / Math.max(80, h * 0.65), -1, 1)
+  } else if (settings.lookFollow && model && forced === 'away') {
+    tx = 0.9
+    ty = -0.45
+  } else if (settings.lookFollow && pointer.at && now - pointer.at < 4000 && model) {
     const w = model.width || 300
     const h = model.height || 400
     const cx = model.x + w / 2
@@ -405,7 +427,7 @@ function destroyModel() {
 }
 
 // --- 动作（阶段 4）----------------------------------------------------------
-// 示例模型的 model3.json 没注册 Motions / Expressions（EXP 里是 exp3 参数表），
+// 大肥鱼的 model3.json 没注册 Motions / Expressions（EXP 里是 exp3 参数表），
 // 所以动作不用库的 motion，而是每帧往 Cubism 参数上写关键帧值：
 //   写参数 → coreModel.update() 立即按新参数算顶点。
 const ANIMS = {
@@ -511,6 +533,14 @@ const PARAM_ALIASES = {
   mouthForm: ['ParamMouthForm'],
   browLY: ['ParamBrowLY'],
   browRY: ['ParamBrowRY'],
+  // 0.4.0：词条库里用到、但不同模型命名不一致的几个
+  eyeSmile: ['ParamEyeSmile', 'EyeSmile'],
+  cheekPuff: ['CheeckPuff', 'ParamCheekPuff', 'CheekPuff'],
+  blush: ['PARAM_EXP4', 'ParamCheek', 'Cheek'],
+  shock: ['PARAM_EXP5'],
+  angry: ['PARAM_EXP6'],
+  drool: ['PARAM_EXP7'],
+  xx: ['PARAM_EXP3'],
 }
 
 let modelParams = new Set()
@@ -593,17 +623,28 @@ function resolveParam(name) {
   return null
 }
 
-function compileCustomAction(def) {
+function compileCustomAction(def, core = null) {
   const tracks = []
   for (const track of def?.tracks ?? []) {
     const id = resolveParam(track?.param)
     if (!id) continue // 这只模型没有这个参数：静默跳过，不影响其它轨道
-    tracks.push({ id, keys: track.keys })
+    let keys = Array.isArray(track.keys) ? track.keys : []
+    // 'current' = 播放时取模型当前值（换装/开关类动作的起点）
+    if (keys.length && keys[0]?.[1] === 'current') {
+      let cur = 0
+      try { cur = Number(core?.getParameterValueById(id)) || 0 } catch { cur = 0 }
+      keys = [[keys[0][0], cur], ...keys.slice(1)]
+    }
+    keys = keys.map(([t, v]) => [t, v === 'current' ? 0 : v])
+    tracks.push({ id, keys })
   }
-  return { duration: Math.max(200, Number(def?.durationMs) || 1000), tracks }
+  return { duration: Math.max(200, Number(def?.durationMs) || 1000), tracks, hold: def?.hold === true, label: def?.label ?? '' }
 }
 
 let animState = null
+// hold 类动作（换装/开关/表情贴图）设完保持，再点一次回到原值
+let heldState = null
+let restoreState = null
 let paramHookInstalled = false
 
 function sampleKeys(keys, t) {
@@ -624,16 +665,58 @@ function sampleKeys(keys, t) {
 }
 
 function applyAnimParams() {
-  if (!animState) return
-  const { core, tracks, duration, startedAt } = animState
+  if (!animState) {
+    applyRestoreParams()
+    return
+  }
+  const { core, tracks, duration, startedAt, hold } = animState
   const t = duration > 0 ? Math.min(1, (performance.now() - startedAt) / duration) : 1
   for (const track of tracks) {
     try { core.setParameterValueById(track.id, sampleKeys(track.keys, t)) } catch { /* 参数不存在 */ }
   }
   if (t >= 1) {
     const done = animState.action
+    if (hold) {
+      // 换装/开关：把终值记住，之后每帧写回（否则会被 idle/眨眼自带参数覆盖）
+      heldState = {
+        action: done,
+        items: tracks.map((track) => ({
+          id: track.id,
+          value: track.keys[track.keys.length - 1][1],
+          prev: track.keys[0][1],
+        })),
+      }
+    }
     animState = null
     report({ type: 'anim-done', action: done })
+  }
+}
+
+/** 取消 hold 动作：用一小段动画把参数送回原值（直接跳会显得闪）。 */
+function restoreTracks(core, items, durationMs = 260) {
+  const tracks = items.map((item) => {
+    let from = item.value
+    try { from = Number(core.getParameterValueById(item.id)) || item.value } catch { from = item.value }
+    return { id: item.id, from, to: item.prev }
+  })
+  return { core, tracks, duration: durationMs, startedAt: performance.now() }
+}
+
+function applyRestoreParams() {
+  if (!restoreState) return
+  const { core, tracks, duration, startedAt } = restoreState
+  const t = Math.min(1, (performance.now() - startedAt) / duration)
+  for (const track of tracks) {
+    try { core.setParameterValueById(track.id, track.from + (track.to - track.from) * t) } catch { /* 参数不存在 */ }
+  }
+  if (t >= 1) restoreState = null
+}
+
+/** 每帧最后写 hold 值：压住 idle/眨眼等自带参数，保证换装状态不被冲掉。 */
+function applyHeldParams(core) {
+  if (!heldState) return
+  for (const item of heldState.items) {
+    try { core.setParameterValueById(item.id, item.value) } catch { /* 参数不存在 */ }
   }
 }
 
@@ -651,6 +734,7 @@ function installParamHook() {
     let readBack = null
     try { applyAnimParams() } catch { /* 参数写失败不影响出画 */ }
     try { if (!animState) applyMotionParams(core) } catch { /* 动态效果失败不影响出画 */ }
+    try { applyHeldParams(core) } catch { /* 换装保持失败不影响出画 */ }
     try {
       applyTalkingParams(core)
       if (speaking.active) {
@@ -697,13 +781,33 @@ function expandAnimTracks(tracks, repeat) {
 
 function playAnimation(action, override = null) {
   const custom = customActions.get(action)
-  const anim = override ?? ANIMS[action] ?? (custom ? compileCustomAction(custom) : null)
   const core = model?.internalModel?.coreModel
+  const anim = override ?? ANIMS[action] ?? (custom ? compileCustomAction(custom, core) : null)
   if (!anim || !core) return false
   if (action === 'idle' || anim.duration === 0) {
     animState = null
+    // 「停止动作」也要结束表情/换装等 hold 状态；否则 idle 只停普通关键帧，
+    // 模型仍会保持上一个能力动作。
+    if (heldState) {
+      restoreState = restoreTracks(core, heldState.items)
+      heldState = null
+    }
     report({ type: 'anim-done', action })
     return true
+  }
+  // 换装/开关类：第一次点 → 切到目标并保持；同一个再点一次 → 恢复原样
+  if (anim.hold) {
+    if (heldState?.action === action) {
+      restoreState = restoreTracks(core, heldState.items)
+      heldState = null
+      restoreState.startedAt = performance.now()
+      report({ type: 'anim-done', action })
+      return true
+    }
+    if (heldState) {
+      restoreState = restoreTracks(core, heldState.items)
+      heldState = null
+    }
   }
   animState = {
     action,
@@ -711,6 +815,7 @@ function playAnimation(action, override = null) {
     tracks: expandAnimTracks(anim.tracks, anim.repeat),
     duration: anim.duration,
     startedAt: performance.now(),
+    hold: anim.hold === true,
   }
   return true
 }
@@ -768,15 +873,26 @@ async function renderModel(modelInfo) {
 // --- 预设动作：右键菜单（动作立刻播放 / 循环开关）---------------------------
 
 let menuOpen = false
+const PRESET_MENU_GAP = 6
+const PRESET_MENU_CLOSE_DELAY_MS = 720
 
 function applyPresets(presets) {
   const value = presets ?? {}
+  const signature = JSON.stringify({
+    profileId: value.profileId ?? null,
+    activeSequence: value.activeSequence ?? null,
+    actions: (value.actions ?? []).map((item) => [item.id, item.label, item.capability === true, item.auto === true, item.tracks?.length ?? 0]),
+    sequences: (value.sequences ?? []).map((item) => [item.id, item.label]),
+  })
+  const unchangedOpenMenu = menuOpen && signature === settings.presetsSignature
   settings.presets = value
+  settings.presetsSignature = signature
   customActions = new Map()
   for (const item of value.actions ?? []) {
     if (item?.kind === 'custom' && item.id && Array.isArray(item.tracks)) customActions.set(item.id, item)
   }
-  renderPresetMenu()
+  // 右键刷新返回同一份档案时，不重建正在交互的菜单 DOM。
+  if (!unchangedOpenMenu) renderPresetMenu()
 }
 
 function menuRow(dataset, label, tag) {
@@ -795,53 +911,289 @@ function menuRow(dataset, label, tag) {
   return row
 }
 
+function menuStatusRow(label, value) {
+  const row = document.createElement('div')
+  row.className = 'menu-item menu-status'
+  const key = document.createElement('span')
+  key.className = 'status-key'
+  key.textContent = label
+  const text = document.createElement('span')
+  text.className = 'status-value'
+  text.textContent = value
+  row.append(key, text)
+  return row
+}
+
+function menuGroup(label, hint, rows) {
+  const group = document.createElement('div')
+  group.className = 'menu-group'
+  group.dataset.menuLabel = label
+  const head = document.createElement('div')
+  head.className = 'menu-item menu-parent'
+  const text = document.createElement('span')
+  text.textContent = label
+  const tag = document.createElement('span')
+  tag.className = 'tag arrow'
+  tag.textContent = hint ? `${hint}  ›` : '›'
+  head.append(text, tag)
+  const submenu = document.createElement('div')
+  submenu.className = 'submenu'
+  if (rows.length) submenu.append(...rows)
+  else {
+    const empty = document.createElement('div')
+    empty.className = 'menu-title'
+    empty.textContent = '暂无内容'
+    submenu.appendChild(empty)
+  }
+  group.append(head, submenu)
+  return group
+}
+
+function menuSubGroup(label, hint, rows) {
+  const group = menuGroup(label, hint, rows)
+  group.classList.add('menu-subgroup')
+  return group
+}
+
+function statusLabel(value) {
+  return {
+    active: '活跃', focused: '专注', idle: '空闲', away: '离开', unknown: '未知',
+    social: '愿意互动', reserved: '稍显安静', tired: '有点累', withdrawn: '不想说话',
+  }[value] ?? String(value ?? '未知')
+}
+
+function relativeTime(value) {
+  const at = Number(value) || 0
+  if (!at) return '暂无记录'
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000))
+  if (seconds < 60) return '刚刚'
+  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟前`
+  if (seconds < 86400) return `${Math.round(seconds / 3600)} 小时前`
+  return `${Math.round(seconds / 86400)} 天前`
+}
+
+function presetStatusRows() {
+  const life = settings.life
+  if (!life) return [menuStatusRow('状态', '生命感循环尚未启动')]
+  const decision = life.lastDecision
+  const reasonLabel = {
+    'nonverbal-only': '只做静默反应',
+    'event-disabled': '事件唤醒未开启',
+    'quiet-hours': '静默时段',
+    'no-context-permission': '没有读屏权限',
+    'agent-running': 'AI 正在忙',
+    'share-budget': '今日分享额度已满',
+    'important-budget': '今日重要额度已满',
+    'event-quota': '每小时额度已满',
+    'event-cooldown': '仍在冷却',
+  }[decision?.reason] ?? decision?.reason
+  const eventLabel = {
+    boot: '启动',
+    'return-after-absence': '离开后返回',
+    'focus-milestone': '专注达到阈值',
+    'app-change': '切换应用',
+    'agent-finished': 'AI 回答完成',
+    'long-idle': '长时间独处',
+  }[life.lastEvent] ?? life.lastEvent
+  const decisionText = decision
+    ? `${decision.speak === true ? '主动说话' : '静默反应'}${reasonLabel ? `（${reasonLabel}）` : ''}`
+    : '暂无'
+  return [
+    menuStatusRow('陪伴循环', life.enabled === false ? '已关闭' : '运行中'),
+    menuStatusRow('注意力', statusLabel(life.attention)),
+    menuStatusRow('观众', { absent: '不在场', ambient: '背景中', attentive: '正在看', present: '在场' }[life.audience] ?? '未知'),
+    menuStatusRow('表达意愿', statusLabel(life.willingness)),
+    menuStatusRow('精力', `${Math.round((Number(life.energy) || 0) * 100)}%`),
+    menuStatusRow('心情', `${Math.round((Number(life.mood) || 0) * 100)}`),
+    menuStatusRow('无聊度', `${Math.round((Number(life.boredom) || 0) * 100)}%`),
+    menuStatusRow('亲密度', `${Math.round((Number(life.closeness) || 0) * 100)}%`),
+    menuStatusRow('今日主动', `${life.dailyShare || 0}/${life.dailyShareMax || 0} 分享 · ${life.dailyImportant || 0}/${life.dailyImportantMax || 0} 重要`),
+    menuStatusRow('上次互动', relativeTime(life.lastUserActivityAt)),
+    menuStatusRow('最近事件', eventLabel || '暂无'),
+    menuStatusRow('最近决策', decisionText),
+    menuStatusRow('主动感知', { off: '关闭', timer: '定时', event: '事件' }[life.wakeDriver] ?? '关闭'),
+    menuStatusRow('双模型关系', life.dualRelationEnabled === false ? '关闭' : `${Math.round((Number(life.peerAffinity) || 0) * 100)}%`),
+    menuStatusRow('陪伴记忆', life.memoryEnabled === true ? '开启（按对话）' : '关闭'),
+  ]
+}
+
+function positionPresetSubmenu(group) {
+  const submenu = group?.querySelector(':scope > .submenu')
+  const menu = els.presetMenu
+  if (!submenu || !menu) return
+  const paneWidth = Number(menu._paneWidth) || 170
+  if (group.classList.contains('menu-subgroup')) {
+    submenu.style.width = `${paneWidth}px`
+  } else {
+    const rootRect = menu.getBoundingClientRect()
+    const wide = group.dataset.menuLabel !== '动作'
+    const available = window.innerWidth - rootRect.right - PRESET_MENU_GAP - 4
+    submenu.style.width = `${wide ? Math.min(230, Math.max(paneWidth, available)) : paneWidth}px`
+  }
+  submenu.style.visibility = 'hidden'
+  submenu.style.display = 'block'
+  const host = group.getBoundingClientRect()
+  const box = submenu.getBoundingClientRect()
+  // 用上一级“面板”的右边缘定位，不能用菜单行文字区域的右边缘；
+  // 否则菜单自身的 padding/border 会让相邻两列产生 1px 交叠。
+  const parentPane = group.classList.contains('menu-subgroup')
+    ? group.parentElement?.closest('.submenu')
+    : menu
+  const parentRight = parentPane?.getBoundingClientRect().right ?? host.right
+  // 优先向右展开。三列总宽度在菜单打开时已预留，因此正常路径不会回翻到父菜单上。
+  let left = parentRight + PRESET_MENU_GAP
+  if (left + box.width > window.innerWidth - 4) left = host.left - box.width - PRESET_MENU_GAP
+  left = Math.max(4, Math.min(left, window.innerWidth - box.width - 4))
+  const top = Math.max(4, Math.min(host.top, window.innerHeight - box.height - 4))
+  submenu.style.left = `${left}px`
+  submenu.style.top = `${top}px`
+  submenu.style.visibility = ''
+  submenu.style.display = ''
+}
+
+function clearPresetSubmenuTimer(group) {
+  for (const item of presetMenuChain(group)) {
+    if (!item?._live2dCloseTimer) continue
+    clearTimeout(item._live2dCloseTimer)
+    item._live2dCloseTimer = null
+  }
+}
+
+function presetMenuChain(group) {
+  const out = []
+  let current = group
+  while (current?.classList?.contains('menu-group')) {
+    out.push(current)
+    current = current.parentElement?.closest('.menu-group')
+  }
+  return out
+}
+
+function closePresetSubmenuBranch(group) {
+  if (!group) return
+  clearPresetSubmenuTimer(group)
+  for (const item of group.querySelectorAll('.submenu-open')) item.classList.remove('submenu-open')
+  group.classList.remove('submenu-open')
+}
+
+function openPresetSubmenu(group) {
+  if (!group) return
+  clearPresetSubmenuTimer(group)
+  if (group.classList.contains('menu-subgroup')) {
+    const pane = group.parentElement?.closest('.submenu')
+    for (const sibling of pane?.querySelectorAll(':scope > .menu-subgroup.submenu-open') ?? []) {
+      if (sibling !== group) closePresetSubmenuBranch(sibling)
+    }
+  } else {
+    for (const sibling of group.parentElement?.querySelectorAll(':scope > .menu-group.submenu-open') ?? []) {
+      if (sibling !== group) closePresetSubmenuBranch(sibling)
+    }
+  }
+  group.classList.add('submenu-open')
+  positionPresetSubmenu(group)
+}
+
+function schedulePresetSubmenuClose(group) {
+  if (!group) return
+  clearPresetSubmenuTimer(group)
+  // 二/三级菜单之间留 720ms 容错；进入任一子菜单都会取消整条父链的关闭计时。
+  group._live2dCloseTimer = setTimeout(() => {
+    group._live2dCloseTimer = null
+    const submenu = group.querySelector(':scope > .submenu')
+    if (group.matches(':hover') || submenu?.matches(':hover') || group.contains(document.activeElement)) return
+    group.classList.remove('submenu-open')
+  }, PRESET_MENU_CLOSE_DELAY_MS)
+}
+
 function renderPresetMenu() {
   const menu = els.presetMenu
   if (!menu) return
-  const actions = settings.presets?.actions ?? []
-  const sequences = settings.presets?.sequences ?? []
+  // 兼容尚未刷新的旧载荷：即使宿主还下发 builtin，也不再在右键菜单展示。
+  const actions = (settings.presets?.actions ?? []).filter((item) => item?.kind !== 'builtin')
+  // “设置页循环”是早期示例/默认循环。数据保留供设置页编辑，但右键菜单不再显示。
+  const sequences = (settings.presets?.sequences ?? [])
+    .filter((item) => !(item.id === 'user-loop' && item.label === '设置页循环'))
   const active = settings.presets?.activeSequence ?? null
+  const defaultActions = actions.filter((item) => item.kind === 'custom' && item.auto === true && item.capability !== true)
+  const customActions = actions.filter((item) => item.kind === 'custom' && item.auto !== true && item.capability !== true)
+  const capabilityActions = actions.filter((item) => item.capability === true)
+  const actionCount = defaultActions.length + customActions.length + capabilityActions.length
   menu.textContent = ''
-  if (!actions.length && !sequences.length) {
-    const empty = document.createElement('div')
-    empty.className = 'menu-title'
-    empty.textContent = '还没有预设动作（设置页可添加）'
-    menu.appendChild(empty)
-    return
-  }
-  if (actions.length) {
-    const title = document.createElement('div')
-    title.className = 'menu-title'
-    title.textContent = '动作'
-    menu.appendChild(title)
-    for (const item of actions) {
-      menu.appendChild(menuRow({ action: item.id }, item.label || item.id, item.kind === 'custom' ? '自定义' : ''))
-    }
-  }
-  if (sequences.length) {
-    const sep = document.createElement('div')
-    sep.className = 'menu-sep'
-    menu.appendChild(sep)
-    const title = document.createElement('div')
-    title.className = 'menu-title'
-    title.textContent = '循环'
-    menu.appendChild(title)
-    for (const seq of sequences) {
-      const running = active === seq.id
-      menu.appendChild(menuRow({ sequence: seq.id }, seq.label || seq.id, running ? '停止' : `${(seq.steps ?? []).length} 步`))
-    }
+  const title = document.createElement('div')
+  title.className = 'menu-title'
+  title.textContent = '桌宠菜单'
+  menu.appendChild(title)
+  menu.appendChild(menuGroup(
+    '动作',
+    `${actionCount} 个`,
+    [
+      ['默认动作', defaultActions],
+      ['自定义动作', customActions],
+      ['模型自带', capabilityActions],
+    ].map(([label, items]) => menuSubGroup(
+      label,
+      `${items.length}`,
+      items.map((item) => menuRow(
+        { action: item.id },
+        item.label || item.id,
+        item.capability ? (item.group || '能力') : (item.auto ? '默认' : ''),
+      )),
+    )).concat([
+      // 固定第 4 项：直接停止当前动作（含表情/换装等 hold 状态）。
+      menuRow({ action: 'idle' }, '停止动作', '立即'),
+    ]),
+  ))
+  menu.appendChild(menuGroup(
+    '循环',
+    `${sequences.length} 个`,
+    [
+      ...sequences.map((seq) => {
+        const running = active === seq.id
+        return menuRow({ sequence: seq.id }, seq.label || seq.id, running ? '停止' : `${(seq.steps ?? []).length} 步`)
+      }),
+      menuRow({ ui: 'loop-settings' }, '循环设置', '打开'),
+      menuRow({ ui: 'stop-loop' }, '停止循环', active ? '立即' : '未运行'),
+    ],
+  ))
+  menu.appendChild(menuGroup('状态', '生命感', presetStatusRows()))
+  for (const group of menu.querySelectorAll('.menu-group')) {
+    group.addEventListener('mouseenter', () => openPresetSubmenu(group))
+    group.addEventListener('mouseleave', () => schedulePresetSubmenuClose(group))
+    group.addEventListener('focusin', () => openPresetSubmenu(group))
+    group.addEventListener('focusout', () => schedulePresetSubmenuClose(group))
+    const submenu = group.querySelector(':scope > .submenu')
+    submenu?.addEventListener('mouseenter', () => clearPresetSubmenuTimer(group))
+    submenu?.addEventListener('mouseleave', () => schedulePresetSubmenuClose(group))
+    group.querySelector(':scope > .menu-parent')?.addEventListener('pointerdown', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      if (group.classList.contains('submenu-open')) {
+        group.classList.remove('submenu-open')
+      } else {
+        openPresetSubmenu(group)
+      }
+    })
   }
 }
 
 function openPresetMenu(x, y) {
   const menu = els.presetMenu
   if (!menu) return
+  // 右键时向宿主要一次当前模型档案，防止换模型后沿用上一只模型的旧菜单。
+  report({ type: 'preset-refresh' })
   renderPresetMenu()
   menu.classList.remove('hidden')
+  // 一级、二级、三级各预留一列。窗口内右键时按整组宽度夹取一级菜单，
+  // 这样三级一定向右放得下，不会采用向左翻并覆盖父菜单的旧方案。
+  const paneWidth = Math.max(48, Math.min(190, Math.floor((window.innerWidth - 24) / 3)))
+  menu._paneWidth = paneWidth
+  menu.style.setProperty('--preset-pane-width', `${paneWidth}px`)
+  menu.style.setProperty('--preset-root-width', `${paneWidth}px`)
   menu.style.left = '0px'
   menu.style.top = '0px'
   const rect = menu.getBoundingClientRect()
-  const maxX = Math.max(4, window.innerWidth - rect.width - 4)
+  const reservedWidth = paneWidth * 3 + PRESET_MENU_GAP * 2
+  const maxX = Math.max(4, window.innerWidth - reservedWidth - 4)
   const maxY = Math.max(4, window.innerHeight - rect.height - 4)
   menu.style.left = `${Math.max(4, Math.min(x, maxX))}px`
   menu.style.top = `${Math.max(4, Math.min(y, maxY))}px`
@@ -853,6 +1205,12 @@ function openPresetMenu(x, y) {
 function closePresetMenu() {
   const menu = els.presetMenu
   if (!menu || menu.classList.contains('hidden')) return
+  for (const group of menu.querySelectorAll('.menu-group')) {
+    clearPresetSubmenuTimer(group)
+  }
+  for (const group of menu.querySelectorAll('.submenu-open')) {
+    group.classList.remove('submenu-open')
+  }
   menu.classList.add('hidden')
   menuOpen = false
 }
@@ -869,14 +1227,21 @@ function bindPresetMenu() {
     if (event.target?.closest?.('#preset-menu')) return
     closePresetMenu()
   })
-  els.presetMenu?.addEventListener('click', (event) => {
+  els.presetMenu?.addEventListener('pointerdown', (event) => {
     const row = event.target?.closest?.('.menu-item')
     if (!row) return
     const action = row.dataset.action
     const sequence = row.dataset.sequence
+    const ui = row.dataset.ui
+    if (!action && !sequence && !ui) return
+    // 在 click 之前派发；避免刷新菜单或穿透切换在 mouseup 前替换被点节点。
+    event.preventDefault()
+    event.stopPropagation()
     closePresetMenu()
     if (action) report({ type: 'preset-play', action })
     if (sequence) report({ type: 'preset-sequence', id: sequence })
+    if (ui === 'loop-settings') report({ type: 'open-settings', section: 'actions' })
+    if (ui === 'stop-loop') report({ type: 'preset-sequence-stop' })
   })
 }
 
@@ -889,6 +1254,7 @@ async function handleInit(command) {  const config = command.config ?? {}
   syncPassthroughButton()
   settings.rendererEnabled = command.model?.ok === true && config.rendererEnabled !== false
   settings.replyStyle = config.replyStyle === 'card' ? 'card' : 'bubble'
+  settings.bubbleSkin = normalizeBubbleSkin(config.bubbleSkin)
   settings.chatTimeoutMs = Number(config.chatTimeoutMs) || 90000
   settings.replyFontSize = Number(config.replyFontSize) || 15
   settings.replyMaxHeightPct = Number(config.replyMaxHeightPct) || 45
@@ -905,8 +1271,11 @@ async function handleInit(command) {  const config = command.config ?? {}
   settings.idlePresets = config.idlePresets !== false
   // 0.13.0：模式与唤醒状态（工具栏按钮）
   settings.mode = MODE_ORDER.includes(config.mode) ? config.mode : 'auto'
+  settings.wakeDriver = ['off', 'timer', 'event'].includes(config.wakeDriver) ? config.wakeDriver : 'off'
   settings.wakeEnabled = config.wakeEnabled === true
+  settings.eventWakeEnabled = config.eventWakeEnabled === true
   settings.wakeBusy = config.wakeBusy === true
+  settings.life = config.life && typeof config.life === 'object' ? config.life : null
   applyPresets(config.presets)
   applyReplyOpacity(config.replyOpacity)
   applyReplyStyle()
@@ -973,7 +1342,66 @@ async function handleCommand(command) {
   // 诊断用：让探针能直接打开菜单（生产里只有宿主能发命令，不对外暴露）
   if (command.type === 'debug-menu') {
     if (command.which === 'mode') openModeMenu()
-    else if (command.which === 'preset') openPresetMenu(Number(command.x) || 40, Number(command.y) || 40)
+    else if (command.which === 'preset') {
+      openPresetMenu(Number(command.x) || 40, Number(command.y) || 40)
+      const menuRoot = els.presetMenu
+      const actionGroup = menuRoot?.querySelector(':scope > .menu-group')
+      const firstActionGroup = actionGroup?.querySelector('.menu-subgroup')
+      if (actionGroup) openPresetSubmenu(actionGroup)
+      if (firstActionGroup) openPresetSubmenu(firstActionGroup)
+      const rectOf = (node) => {
+        if (!node) return null
+        const rect = node.getBoundingClientRect()
+        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height }
+      }
+      const overlaps = (a, b) => Boolean(a && b
+        && a.left < b.right - 0.5 && a.right > b.left + 0.5
+        && a.top < b.bottom - 0.5 && a.bottom > b.top + 0.5)
+      const menuRect = rectOf(menuRoot)
+      const secondRect = rectOf(actionGroup?.querySelector(':scope > .submenu'))
+      const thirdRect = rectOf(firstActionGroup?.querySelector(':scope > .submenu'))
+      report({
+        type: 'state',
+        phase: 'preset-menu',
+        groups: [...(els.presetMenu?.querySelectorAll(':scope > .menu-group > .menu-parent > span:first-child') ?? [])]
+          .map((node) => node.textContent),
+        actionGroups: [...(els.presetMenu?.querySelectorAll('.menu-subgroup > .menu-parent > span:first-child') ?? [])]
+          .map((node) => node.textContent),
+        actionEntries: [
+          ...(els.presetMenu?.querySelectorAll('.menu-group > .submenu > .menu-subgroup > .menu-parent > span:first-child') ?? []),
+          ...(els.presetMenu?.querySelectorAll('.menu-group > .submenu > .menu-item[data-action="idle"] > span:first-child') ?? []),
+        ].map((node) => node.textContent),
+        loopEntries: [...((els.presetMenu?.querySelectorAll(':scope > .menu-group') ?? [])[1]?.querySelectorAll(':scope > .submenu > .menu-item') ?? [])]
+          .map((node) => node.querySelector('span:first-child')?.textContent)
+          .filter(Boolean),
+        nestedSubmenuPosition: (() => {
+          const nested = els.presetMenu?.querySelector('.menu-subgroup > .submenu')
+          return nested ? getComputedStyle(nested).position : null
+        })(),
+        menuCloseDelayMs: PRESET_MENU_CLOSE_DELAY_MS,
+        menuGeometry: {
+          root: menuRect,
+          second: secondRect,
+          third: thirdRect,
+          noOverlap: !overlaps(menuRect, secondRect)
+            && !overlaps(menuRect, thirdRect)
+            && !overlaps(secondRect, thirdRect),
+          insideViewport: [menuRect, secondRect, thirdRect].every((rect) => rect
+            && rect.left >= 0 && rect.top >= 0
+            && rect.right <= window.innerWidth + 0.5 && rect.bottom <= window.innerHeight + 0.5),
+        },
+        statusRows: els.presetMenu?.querySelectorAll('.menu-status').length ?? 0,
+      })
+      if (command.clickFirstAction === true) {
+        const row = els.presetMenu?.querySelector('.menu-subgroup .menu-item[data-action]')
+        if (row) {
+          const init = { bubbles: true, cancelable: true, button: 0 }
+          row.dispatchEvent(typeof PointerEvent === 'function' ? new PointerEvent('pointerdown', init) : new MouseEvent('mousedown', init))
+        }
+      } else {
+        closePresetMenu()
+      }
+    }
     return
   }
   // sessionId 显式给了就更新（null / 空串 = 解绑）；没给则保持上一次的值
@@ -1015,6 +1443,26 @@ async function handleCommand(command) {
   }
   if (command.type === 'bubble') {
     showBubble(command)
+    return
+  }
+  if (command.type === 'farewell') {
+    clearLoading()
+    try { playAnimation('nod') } catch { /* 无模型也能显示文字 */ }
+    showReply(String(command.text || '那我先休息啦，下次见。'), {
+      style: settings.replyStyle,
+      autoHideMs: Number(command.durationMs) || 1200,
+      format: 'text',
+    })
+    return
+  }
+  if (command.type === 'look-at') {
+    const mode = ['cursor', 'user', 'peer', 'away', 'none'].includes(command.mode) ? command.mode : 'cursor'
+    gazeMode = mode
+    gazeTarget = mode === 'peer' && command.target
+      ? { x: Number(command.target.x) || 0, y: Number(command.target.y) || 0 }
+      : null
+    gazeUntil = mode === 'none' ? 0 : performance.now() + clampNum(command.durationMs, 500, 60_000)
+    if (mode === 'none') pointer = { ...pointer, at: 0 }
     return
   }
   if (command.type === 'repaint') {
@@ -1127,6 +1575,7 @@ async function handleCommand(command) {
     if (typeof patch.adjustMode === 'boolean') setAdjustMode(patch.adjustMode)
     if (patch.presets && typeof patch.presets === 'object') applyPresets(patch.presets)
     if (patch.replyStyle === 'card' || patch.replyStyle === 'bubble') settings.replyStyle = patch.replyStyle
+    if (typeof patch.bubbleSkin === 'string') applyBubbleSkin(patch.bubbleSkin)
     if (Number.isFinite(patch.replyOpacity)) applyReplyOpacity(patch.replyOpacity)
     if (Number.isFinite(patch.chatTimeoutMs)) settings.chatTimeoutMs = patch.chatTimeoutMs
     if (Number.isFinite(patch.replyFontSize) || Number.isFinite(patch.replyMaxHeightPct) || Number.isFinite(patch.replyHeightRatio) ||
@@ -1144,10 +1593,16 @@ async function handleCommand(command) {
       settings.mode = patch.mode
       syncModeButton()
     }
-    if (typeof patch.wakeEnabled === 'boolean' || typeof patch.wakeBusy === 'boolean') {
+    if (typeof patch.wakeDriver === 'string' || typeof patch.wakeEnabled === 'boolean' ||
+        typeof patch.eventWakeEnabled === 'boolean' || typeof patch.wakeBusy === 'boolean') {
+      if (['off', 'timer', 'event'].includes(patch.wakeDriver)) settings.wakeDriver = patch.wakeDriver
       if (typeof patch.wakeEnabled === 'boolean') settings.wakeEnabled = patch.wakeEnabled
+      if (typeof patch.eventWakeEnabled === 'boolean') settings.eventWakeEnabled = patch.eventWakeEnabled
       if (typeof patch.wakeBusy === 'boolean') settings.wakeBusy = patch.wakeBusy
       syncModeButton()
+    }
+    if (patch.life && typeof patch.life === 'object') {
+      settings.life = patch.life
     }
     if (typeof patch.pinned === 'boolean') syncPinButton(patch.pinned)
     // 模型缩放 / 布局模式：改完立即重排（不需要关窗重开）
@@ -1166,6 +1621,10 @@ async function handleCommand(command) {
       app?.renderer?.resize(patch.windowWidth, patch.windowHeight)
       fitModel()
     }
+    return
+  }
+  if (command.type === 'life-status') {
+    settings.life = command.status && typeof command.status === 'object' ? command.status : null
     return
   }
   if (command.type === 'reload') {
@@ -1214,6 +1673,20 @@ function applyReplyOpacity(value) {
   const next = Number(value)
   replyOpacity = Number.isFinite(next) ? Math.min(1, Math.max(0.3, next)) : 0.9
   document.documentElement.style.setProperty('--reply-opacity', String(replyOpacity))
+}
+
+const BUBBLE_SKINS = ['classic', 'cloud', 'signboard', 'note']
+
+function normalizeBubbleSkin(value) {
+  return BUBBLE_SKINS.includes(value) ? value : 'classic'
+}
+
+function applyBubbleSkin(value) {
+  settings.bubbleSkin = normalizeBubbleSkin(value)
+  for (const item of els.reply?.querySelectorAll('.reply-item') ?? []) {
+    item.classList.remove(...BUBBLE_SKINS.map((skin) => `skin-${skin}`))
+    item.classList.add(`skin-${settings.bubbleSkin}`)
+  }
 }
 
 /** 字号与回答区最大高度（超过就在气泡内部滚动）。 */
@@ -1439,7 +1912,8 @@ function showReply(text, { style = 'bubble', error = false, loading = false, aut
   // 长回答才把模型压小让出空间；短气泡不预留，模型保持大
   setReplyMode(text)
   const item = document.createElement('div')
-  item.className = `reply-item ${style === 'card' ? 'card' : 'bubble-style'}${error ? ' error' : ''}${loading ? ' loading' : ''}`
+  const skinClass = style === 'card' ? '' : ` skin-${normalizeBubbleSkin(settings.bubbleSkin)}`
+  item.className = `reply-item ${style === 'card' ? 'card' : 'bubble-style'}${skinClass}${error ? ' error' : ''}${loading ? ' loading' : ''}`
   if (format === 'markdown') renderMarkdown(item, text)
   else item.textContent = text
   const wrap = document.createElement('div')
@@ -1474,6 +1948,7 @@ function showReply(text, { style = 'bubble', error = false, loading = false, aut
       report({
         type: 'state',
         phase: 'reply-metrics',
+        bubbleSkin: settings.bubbleSkin,
         mode: replyMode,
         chars: String(text).length,
         renderedChars: item.textContent.length,
@@ -1484,7 +1959,9 @@ function showReply(text, { style = 'bubble', error = false, loading = false, aut
         scrollbarVisible: !!scroller && scroller.bar.style.display === 'block',
         fontSize: computed.fontSize,
       })
-    } catch { /* 只影响诊断 */ }
+    } catch (error) {
+      report({ type: 'state', phase: 'reply-measure-error', seq, error: String(error?.message || error) })
+    }
   }
   requestAnimationFrame(() => requestAnimationFrame(measure))
   // 和底部短气泡一致：按 bubbleDurationMs 自动淡出（有 seq 的走 hideReply，语音读完也能收）
@@ -1816,6 +2293,11 @@ els.adjustMove?.addEventListener('mousedown', (event) => beginDrag(event, 'move'
 function handlePointerMove(x, y) {
   // 视线跟随需要知道指针位置（穿透时由主进程 pointer-probe 喂进来）
   pointer = { x, y, at: performance.now() }
+  if (tapStart && !drag && Math.hypot(x - tapStart.x, y - tapStart.y) > 8) {
+    clearTimeout(tapHoldTimer)
+    tapHoldTimer = null
+    tapStart = null
+  }
   // 右键菜单 / 模式下拉开着就别穿透：菜单项要能点
   if (menuOpen || modeMenuOpen) {
     setIgnore(false)
@@ -1876,33 +2358,88 @@ document.addEventListener('mouseleave', () => {
 })
 
 // --- 自动模式预设交互：点模型身体 / 摸头（用户自己点，不算 AI 主动控制） ---
-// 命中只在模型可视范围内；头顶 32% 算「摸头」，其余算「戳一下」。
+// 命中只在模型可视范围内。P3 用几何区域兜底，不要求模型作者配置 HitArea。
 let tapStart = null
+let tapHoldTimer = null
+let lastTap = { at: 0, zone: '' }
+// 单击延迟上报：等 300ms 看有没有第二下（宿主有 1.2s 动作冷却，先报单击会把双击吃掉）
+let pendingTapTimer = null
+let pendingTap = null
+function flushPendingTap() {
+  const pending = pendingTap
+  pendingTap = null
+  pendingTapTimer = null
+  if (pending) report({ type: 'tap', zone: pending.zone, gesture: 'tap' })
+}
+function cancelPendingTap() {
+  if (pendingTapTimer) clearTimeout(pendingTapTimer)
+  pendingTapTimer = null
+  pendingTap = null
+}
 function modelHitAt(x, y) {
   if (!model || !app) return null
   const b = model.getBounds()
   if (!b.width || !b.height) return null
   if (x < b.x || x > b.x + b.width || y < b.y || y > b.y + b.height) return null
-  return { zone: y <= b.y + b.height * 0.32 ? 'head' : 'body' }
+  const nx = (x - b.x) / b.width
+  const ny = (y - b.y) / b.height
+  let zone = 'body'
+  if (ny <= 0.42) {
+    zone = (ny <= 0.18 || nx <= 0.18 || nx >= 0.82) ? 'hair' : 'face'
+  } else if (ny >= 0.5 && (nx <= 0.16 || nx >= 0.84)) {
+    zone = 'hand'
+  }
+  return { zone, nx, ny }
 }
 
 document.addEventListener('pointerdown', (event) => {
   if (event.button !== 0 || drag) return
-  if (event.target.closest('#toolbar, #composer, #reply, #adjust, #instance-title')) return
+  // 右键菜单开着时，点模型只负责关菜单，不触发摸头/动作
+  if (menuOpen) { closePresetMenu(); return }
+  if (event.target.closest('#toolbar, #composer, #reply, #adjust, #instance-title, #mode-menu, #preset-menu')) return
   const hit = modelHitAt(event.clientX, event.clientY)
   if (!hit) return
-  tapStart = { x: event.clientX, y: event.clientY, at: performance.now(), zone: hit.zone }
+  tapStart = { x: event.clientX, y: event.clientY, at: performance.now(), zone: hit.zone, reported: false }
+  clearTimeout(tapHoldTimer)
+  tapHoldTimer = setTimeout(() => {
+    if (!tapStart || drag || tapStart.reported) return
+    tapStart.reported = true
+    const gesture = tapStart.zone === 'hair' ? 'pat' : 'long'
+    report({ type: 'tap', zone: tapStart.zone, gesture })
+  }, 520)
 })
 
 document.addEventListener('pointerup', (event) => {
   if (!tapStart) return
   const start = tapStart
   tapStart = null
+  clearTimeout(tapHoldTimer)
+  tapHoldTimer = null
   if (drag) return
   if (!settings.autoInteract) return
   const moved = Math.hypot(event.clientX - start.x, event.clientY - start.y)
   if (moved > 6 || performance.now() - start.at > 600) return
-  report({ type: 'tap', zone: start.zone })
+  if (start.reported) return
+  const now = performance.now()
+  const isDouble = now - lastTap.at <= 360 && lastTap.zone === start.zone
+  if (isDouble) {
+    // 第二下：取消挂起的单击，立刻报双击（避免被宿主 1.2s 冷却吞掉）
+    cancelPendingTap()
+    lastTap = { at: 0, zone: start.zone }
+    report({ type: 'tap', zone: start.zone, gesture: 'double' })
+    return
+  }
+  lastTap = { at: now, zone: start.zone }
+  cancelPendingTap()
+  pendingTap = { zone: start.zone }
+  pendingTapTimer = setTimeout(flushPendingTap, 300)
+})
+
+document.addEventListener('pointercancel', () => {
+  clearTimeout(tapHoldTimer)
+  tapHoldTimer = null
+  tapStart = null
+  cancelPendingTap()
 })
 
 document.addEventListener('mouseup', () => {
@@ -1921,7 +2458,7 @@ document.addEventListener('mouseup', () => {
   try { api.report({ type: 'drag', active: false }) } catch { /* 忽略 */ }
   if (isTap) {
     const hit = modelHitAt(startX, startY)
-    if (hit && settings.autoInteract) report({ type: 'tap', zone: hit.zone })
+    if (hit && settings.autoInteract) report({ type: 'tap', zone: hit.zone, gesture: 'tap' })
     // 点一下不改几何，也不写盘；边框照常按空闲规则隐藏
     scheduleHideAdjust()
     return
