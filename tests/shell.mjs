@@ -717,7 +717,7 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
   check('chat 上一条未回 → 409', again.statusCode === 409, again.body)
 
   // 模拟 assistant 回复落盘 + agent 空闲 → 应该推一条 reply
-  ctx._sessionState.messages.push({ role: 'assistant', content: [{ type: 'text', text: '我在呀，主人。' }] })
+  ctx._sessionState.messages.push({ role: 'assistant', content: [{ type: 'text', text: '我在呀。' }] })
   ctx.emitForTest('agent/status', { status: 'idle' })
   await new Promise((resolve) => setTimeout(resolve, 600))
   const reply = sent.filter((item) => item.type === 'reply').pop()
@@ -958,7 +958,7 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
     id: 's-auto',
     deriveMessages: () => [
       { role: 'user', content: [{ type: 'text', text: '在吗' }] },
-      { role: 'assistant', content: [{ type: 'text', text: '在的，主人。' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '在的。' }] },
     ],
   }
   // 0.13.0：气泡由「回复来源」决定，不再由模式一刀切
@@ -970,7 +970,7 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
   commands.length = 0
   const pushedWindow = autoPushReply(autoState, session, () => {}, null, 'window-chat')
   check('auto + window-chat 推气泡', pushedWindow === 1
-    && commands.some((item) => item.command.type === 'bubble' && item.command.text === '在的，主人。'),
+    && commands.some((item) => item.command.type === 'bubble' && item.command.text === '在的。'),
     JSON.stringify(commands.map((item) => item.command.type)))
 
   commands.length = 0

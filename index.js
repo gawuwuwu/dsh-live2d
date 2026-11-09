@@ -104,7 +104,7 @@ export const DEFAULT_INSTANCE = {
   presetSequences: [],
   // 阶段 4：读屏第一层（只读前台窗口标题，不截图）
   // 0.13.9：模式功能默认可用——半自动/主动唤醒要读标题才「知道你在干什么」，
-  // 关掉会让「切模式」看起来毫无区别（用户 m13380）。想关可在「模式设置」里关。
+  // 关掉会让「切模式」看起来毫无区别（用户反馈）。想关可在「模式设置」里关。
   screenReadEnabled: true,
   // 定时感知：后台每隔 N 秒读一次前台标题（只读标题、不落盘；auto 模式跳过）
   screenWatchEnabled: false,
@@ -140,7 +140,7 @@ export const DEFAULT_INSTANCE = {
   wakeDriver: 'off',
   wakeEnabled: false,
   wakeIntervalMs: 30_000,
-  // 唤醒时截图：不打开的话唤醒只能读到窗口标题（用户 m13615 实测后要求默认开）
+  // 唤醒时截图：不打开的话唤醒只能读到窗口标题（用户实测后要求默认开）
   wakeCaptureEnabled: true,
   wakeMaxPerHour: 60,
   wakeTimeoutMs: 120_000,
@@ -162,7 +162,7 @@ export const DEFAULT_INSTANCE = {
   eventQuietEnd: '08:00',
   lifeFarewellEnabled: true,
   // 0.13.0：AI 自主移动/缩放窗口（仅 manual 模式生效）
-  // 0.13.9：默认开——否则「AI 自动」和普通模式看不出区别（用户 m13380）
+  // 0.13.9：默认开——否则「AI 自动」和普通模式看不出区别（用户反馈）
   aiMoveEnabled: true,
 }
 
@@ -1633,7 +1633,7 @@ export function canControl(inst, capability, ctx = {}) {
     case 'anim':
     case 'action':
       // source='ui' = 用户在设置页/右键菜单亲手点，不受模式限制；
-      // 用户在 auto 里点 ⚡ 也不放开 AI 动作（用户 m11528 确认）
+      // 用户在 auto 里点 ⚡ 也不放开 AI 动作（用户确认）
       if (source === 'ui') return true
       return mode !== 'auto'
     case 'bubble':
@@ -2127,7 +2127,7 @@ export const PERSISTED_KEYS = [
   'migrated',
 ]
 
-/** 模式功能开关：关掉会让「切模式」看不出区别，故决定默认开（用户 m13380）。 */
+/** 模式功能开关：关掉会让「切模式」看不出区别，故决定默认开（用户反馈）。 */
 export const MODE_SWITCH_KEYS = ['screenReadEnabled', 'screenCaptureEnabled', 'wakeCaptureEnabled', 'wakeEnabled', 'aiMoveEnabled']
 
 /**
@@ -2156,7 +2156,7 @@ export function migrateModeSwitches(state, marker = '0.13.9-mode-switches') {
 
 /**
  * 0.3.2 一次性迁移：把实例上的 customActions / presetSequences 搬进「模型档案」。
- * 流程（用户 m16320 要求）：备份 → 创建/合并档案 → 校验 → 原子写盘 → 确认成功后再清空实例字段 → 迁移报告。
+ * 流程（用户要求）：备份 → 创建/合并档案 → 校验 → 原子写盘 → 确认成功后再清空实例字段 → 迁移报告。
  * 这个函数只做「计算 + 改内存」，写盘与清空交给调用方（apply），保证「先写盘成功再清空」。
  */
 export function migrateModelProfiles(state, marker = '0.3.2-model-profiles') {
@@ -4441,7 +4441,7 @@ export function designAction(label, description) {
  * 窗口要显示/播放的预设动作。
  *
  * 内置动作仍留在渲染层和 ANIM_WHITELIST 里，供摸头、生命感和旧调用使用；
- * 但它们按大肥鱼参数写死，不能作为跨模型菜单项展示。菜单只下发当前模型
+ * 但它们按示例模型参数写死，不能作为跨模型菜单项展示。菜单只下发当前模型
  * 可验证的默认动作、模型自带能力，以及用户/AI 的自定义动作。
  */
 export function buildPresets(inst, profile = null) {
@@ -5394,7 +5394,7 @@ export const BUILTIN_ACTION_LABELS = {
 const BUILTIN_ACTION_IDS = new Set(ANIM_WHITELIST)
 
 // --- 动作词条库（0.4.0）-------------------------------------------------------
-// 起因：内置 12 个动作写死「大肥鱼」的参数（PARAM_EXP3~8 等），换到没这些参数的模型上，
+// 起因：内置 12 个动作写死「示例模型」的参数（PARAM_EXP3~8 等），换到没这些参数的模型上，
 // 缺轨被静默跳过 → 用户看到「动作做不出来」。改成词条库：每条只声明自己要哪几个逻辑参数，
 // 模型加载后按它的真实参数筛出「所有轨道都落得下」的，挑 10 条写进模型档案当默认动作。
 // pool 决定优先级：core（标准参数，人人有）> special（模型专属参数）> exp（表情贴图参数）。
@@ -5479,7 +5479,7 @@ export const ACTION_LIBRARY = [
       { param: 'pupilX', keys: [[0, 0], [0.25, 0.8], [0.6, -0.8], [1, 0]] },
       { param: 'pupilY', keys: [[0, 0], [0.25, 0.3], [0.6, -0.3], [1, 0]] },
     ] },
-  // 表情贴图池：靠模型的 EXP* 参数（大肥鱼这类模型有，很多模型没有 → 会自动跳过）
+  // 表情贴图池：靠模型的 EXP* 参数（示例模型这类模型有，很多模型没有 → 会自动跳过）
   { id: 'blush', label: '脸红', desc: '腮红贴图 + 歪头', pool: 'exp', durationMs: 3200,
     needs: ['blush'], tracks: [
       { param: 'blush', keys: [[0, 0], [0.12, 1], [0.86, 1], [1, 0]] },
@@ -5532,7 +5532,7 @@ const LIBRARY_PARAM_ALIASES = {
   pupilY: ['PupilY'],
   blush: ['PARAM_EXP4'],
   shockEye: ['PARAM_EXP5'],
-  // 大肥鱼实测：EXP3 = X 眼、EXP6 = 脸黑、EXP7 = 流口水（早期动作实现已验证过）
+  // 示例模型实测：EXP3 = X 眼、EXP6 = 脸黑、EXP7 = 流口水（早期动作实现已验证过）
   xeyes: ['PARAM_EXP3'],
   drool: ['PARAM_EXP7'],
   darkFace: ['PARAM_EXP6'],
@@ -5583,7 +5583,7 @@ export function pickDefaultActions(params, limit = 10) {
     })
   }
   for (const entry of core.slice(0, 7)) take(entry)
-  // 剩余名额：先补「表情类」（大肥鱼这类有 PARAM_EXP* 的模型），再补其它专属动作
+  // 剩余名额：先补「表情类」（示例模型这类有 PARAM_EXP* 的模型），再补其它专属动作
   const extraOrdered = [
     ...extra.filter((entry) => entry.pool === 'exp'),
     ...extra.filter((entry) => entry.pool !== 'exp'),
@@ -8309,7 +8309,7 @@ export function createLive2dTools(state, log) {
             instanceId: inst.id,
             profileId: profile?.id ?? null,
             profileLabel: profile?.label ?? null,
-            // 内置动作仍可被内部事件/AI 调用，但菜单已不再按大肥鱼皮套展示。
+            // 内置动作仍可被内部事件/AI 调用，但菜单已不再按示例模型皮套展示。
             builtin: ANIM_WHITELIST.map((id) => ({ id, label: BUILTIN_ACTION_LABELS[id] ?? id })),
             defaultActions: (profile?.autoActions ?? [])
               .filter((item) => !customIds.has(item.id))

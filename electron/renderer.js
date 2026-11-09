@@ -427,12 +427,12 @@ function destroyModel() {
 }
 
 // --- 动作（阶段 4）----------------------------------------------------------
-// 大肥鱼的 model3.json 没注册 Motions / Expressions（EXP 里是 exp3 参数表），
+// 示例模型的 model3.json 没注册 Motions / Expressions（EXP 里是 exp3 参数表），
 // 所以动作不用库的 motion，而是每帧往 Cubism 参数上写关键帧值：
 //   写参数 → coreModel.update() 立即按新参数算顶点。
 const ANIMS = {
   idle: { duration: 0, tracks: [] },
-  // 点头：单次 0.73s，连点 3 次（用户 m13615：要「多次」而不是「更长」）
+  // 点头：单次 0.73s，连点 3 次（用户反馈：要「多次」而不是「更长」）
   nod: { duration: 2200, repeat: 3, tracks: [{ id: 'ParamAngleY', keys: [[0, 0], [0.2, -26], [0.6, -24], [1, 0]] }] },
   // 摇头：左右两次
   shake: { duration: 2000, repeat: 2, tracks: [{ id: 'ParamAngleX', keys: [[0, 0], [0.22, 24], [0.62, -22], [1, 0]] }] },
