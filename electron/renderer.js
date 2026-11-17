@@ -56,6 +56,7 @@ const settings = {
   motionStrength: 60,
   // 自动模式预设交互：点模型/摸头有反应（点击由用户触发，不算 AI 主动控制）
   autoInteract: true,
+  preserveIndependentHolds: true,
   // 0.13.0：模式（manual/semi/auto）与主动唤醒状态
   mode: 'auto',
   wakeDriver: 'off',
@@ -69,6 +70,7 @@ const settings = {
 
 // 动态效果状态：指针位置（喂视线）、模型基准 y（浮动锚点）、拖拽惯性角度
 let pointer = { x: 0, y: 0, at: 0 }
+let baseModelX = 0
 let baseModelY = 0
 let look = { x: 0, y: 0 }
 let gazeMode = 'cursor'
@@ -118,6 +120,7 @@ function motionK() {
  * 有动作（animState）在跑时让位给动作，避免两套参数互相打架。
  */
 function applyMotionParams(core) {
+  if (poseEditorActive) return
   const now = performance.now()
   const k = motionK()
   let tx = 0
@@ -147,21 +150,35 @@ function applyMotionParams(core) {
   // 平滑跟随，指针离开后缓慢回中（不要瞬跳）
   look.x += (tx - look.x) * 0.14
   look.y += (ty - look.y) * 0.14
+  const idleSway = settings.idleFloat ? k : 0
+  const swayHeadX = Math.sin(now / 4300) * 4 * idleSway
+  const swayHeadY = Math.cos(now / 5300) * 2 * idleSway
+  const swayHeadZ = Math.sin(now / 3600) * 4.5 * idleSway
+  const swayBodyX = Math.sin(now / 4100) * 4 * idleSway
+  const swayBodyY = Math.cos(now / 6200) * 1.8 * idleSway
+  const swayBodyZ = Math.sin(now / 5200) * 2.8 * idleSway
+  const swayHipX = Math.sin(now / 4700) * 2.2 * idleSway
   try {
     // 角度乘数给足：7°/5° 在 320 宽的小窗里几乎看不出转头（实测截图对比才发现）
     core.setParameterValueById('ParamEyeBallX', look.x * 0.95 * k)
     core.setParameterValueById('ParamEyeBallY', look.y * 0.8 * k)
-    core.setParameterValueById('ParamAngleX', look.x * 22 * k)
-    core.setParameterValueById('ParamAngleY', look.y * 14 * k)
+    core.setParameterValueById('ParamAngleX', look.x * 22 * k + swayHeadX)
+    core.setParameterValueById('ParamAngleY', look.y * 14 * k + swayHeadY)
   } catch { /* 模型没有眼球参数就只跟头 */ }
+  try { core.setParameterValueById('ParamBodyAngleX', swayBodyX) } catch { /* 无躯干 X */ }
+  try { core.setParameterValueById('ParamBodyAngleY', swayBodyY) } catch { /* 无躯干 Y */ }
+  try { core.setParameterValueById('ParamBodyAngleZ', swayBodyZ) } catch { /* 无躯干 Z */ }
+  try { core.setParameterValueById('ParamHipAngleX', swayHipX) } catch { /* 无髋部参数 */ }
+  let headZ = swayHeadZ
   if (settings.dragInertia && Math.abs(inertiaAngle) > 0.02) {
     inertiaAngle *= 0.9
-    try { core.setParameterValueById('ParamAngleZ', inertiaAngle * k) } catch { /* 无此参数 */ }
+    headZ += inertiaAngle * k
   }
   // 挪窗口时轻轻摆头，配合窗口的平滑位移（宿主在 move 前发 walk 命令）
   if (performance.now() < walkUntil) {
-    try { core.setParameterValueById('ParamAngleZ', Math.sin(performance.now() / 90) * 6) } catch { /* 无此参数 */ }
+    headZ += Math.sin(performance.now() / 90) * 6
   }
+  try { core.setParameterValueById('ParamAngleZ', headZ) } catch { /* 无此参数 */ }
 }
 
 // 待机浮动：只动 model.y（渲染层位移），不写参数，所以不会和物理/动作抢
@@ -170,6 +187,11 @@ let walkUntil = 0
 let walkPhase = 0
 function tickFloat(ticker) {
   if (!model) return
+  if (poseEditorActive) {
+    model.x = baseModelX - poseEditorLayoutOffset
+    if (model.y !== baseModelY) model.y = baseModelY
+    return
+  }
   const k = motionK()
   const walking = performance.now() < walkUntil
   if (walking) walkPhase += (ticker?.deltaTime ?? 1) / 60
@@ -316,6 +338,7 @@ function playAudio(base64, mime = 'audio/wav') {
 
 /** 说话时嘴巴开合（正弦近似，跟随播放时长自然停止）。 */
 function applyTalkingParams(core) {
+  if (poseEditorActive) return
   if (!speaking.active) return
   const t = (performance.now() - speaking.startedAt) / 1000
   // 2π ≈ 每秒一个开合周期（真人说话节奏）；正弦本身带缓动，张合不发抖。
@@ -377,7 +400,9 @@ function fitModel() {
   model.x = (W - bounds.width * scale) / 2 - bounds.x * scale
   model.y = H - reserved - bounds.height * scale - bounds.y * scale
   // 待机浮动的锚点：浮动只做 y 方向的小偏移，不破坏上面算好的站位
+  baseModelX = model.x
   baseModelY = model.y
+  if (poseEditorActive) applyPoseEditorLayout()
   state.bubblePx = Math.round(bubblePx)
   state.modelPx = Math.round(bounds.height * scale)
   report({ type: 'state', phase: 'layout', bubblePx: state.bubblePx, modelPx: state.modelPx, windowWidth: W, windowHeight: H, fixedBubble: Boolean(settings.bubbleFixedSize) })
@@ -423,16 +448,19 @@ function destroyModel() {
   } catch { /* 销毁失败不影响重载 */ }
   model = null
   animState = null
+  heldStates.clear()
+  restoreState = null
+  modelParamMeta = {}
   paramHookInstalled = false
 }
 
 // --- 动作（阶段 4）----------------------------------------------------------
-// 示例模型的 model3.json 没注册 Motions / Expressions（EXP 里是 exp3 参数表），
+// 大肥鱼的 model3.json 没注册 Motions / Expressions（EXP 里是 exp3 参数表），
 // 所以动作不用库的 motion，而是每帧往 Cubism 参数上写关键帧值：
 //   写参数 → coreModel.update() 立即按新参数算顶点。
 const ANIMS = {
   idle: { duration: 0, tracks: [] },
-  // 点头：单次 0.73s，连点 3 次（用户反馈：要「多次」而不是「更长」）
+  // 点头：单次 0.73s，连点 3 次（用户 m13615：要「多次」而不是「更长」）
   nod: { duration: 2200, repeat: 3, tracks: [{ id: 'ParamAngleY', keys: [[0, 0], [0.2, -26], [0.6, -24], [1, 0]] }] },
   // 摇头：左右两次
   shake: { duration: 2000, repeat: 2, tracks: [{ id: 'ParamAngleX', keys: [[0, 0], [0.22, 24], [0.62, -22], [1, 0]] }] },
@@ -525,6 +553,24 @@ const PARAM_ALIASES = {
   headY: ['ParamAngleY'],
   headZ: ['ParamAngleZ'],
   bodyX: ['ParamBodyAngleX'],
+  bodyY: ['ParamBodyAngleY'],
+  bodyZ: ['ParamBodyAngleZ'],
+  shoulderL: ['LArm', 'ParamArmLA', 'ParamArmL', 'Param_Arm_L', 'Param_arm_L1', 'ShoulderY', 'ShoulderZ', 'ShoulderX'],
+  armL: ['LArm', 'ParamArmLA', 'ParamArmL', 'Param_Arm_L', 'Param_arm_L1'],
+  elbowL: ['LForearm', 'ParamArmLB', 'Param_arm_L2', 'ParamForearmL'],
+  wristL: ['LWrist', 'ParamArmLC', 'Param_arm_L3', 'ParamWristL'],
+  handL: ['LHand', 'LHand2', 'ParamHandL', 'ParamHandLA', 'Param_hand_L1', 'Param_hand_L2', 'Param_hand_L3', 'Param_hand_L4'],
+  shoulderR: ['RArm', 'ParamArmRA', 'ParamArmR', 'Param_Arm_R', 'Param_arm_R1', 'ShoulderY', 'ShoulderZ', 'ShoulderX'],
+  armR: ['RArm', 'ParamArmRA', 'ParamArmR', 'Param_Arm_R', 'Param_arm_R1'],
+  armZL: ['Param44', 'ArmZL', 'ParamArmZL', 'Param_ArmZ_L'],
+  armZR: ['Param25', 'ArmZR', 'ParamArmZR', 'Param_ArmZ_R'],
+  elbowR: ['RForearm', 'ParamArmRB', 'Param_arm_R2', 'ParamForearmR'],
+  wristR: ['RWrist', 'ParamArmRC', 'Param_arm_R3', 'ParamWristR'],
+  handR: ['RHand', 'RHand2', 'ParamHandR', 'ParamHandRA', 'Param_hand_R1', 'Param_hand_R2', 'Param_hand_R3', 'Param_hand_R4'],
+  legL: ['ParamLegL', 'ParamLegLA', 'Param_leg_L1', 'Param_leg_L2'],
+  legR: ['ParamLegR', 'ParamLegRA', 'Param_leg_R1', 'Param_leg_R2'],
+  hipX: ['HipAngleX', 'ParamHipAngleX', 'ParamHipAngleXq'],
+  hipZ: ['ParamHipAngleZ', 'HipAngleZ', 'HipZ1', 'HipZ2'],
   eyeOpenL: ['ParamEyeLOpen'],
   eyeOpenR: ['ParamEyeROpen'],
   eyeBallX: ['ParamEyeBallX'],
@@ -544,7 +590,9 @@ const PARAM_ALIASES = {
 }
 
 let modelParams = new Set()
+let modelParamMeta = {}
 let customActions = new Map()
+let armSideMap = { left: 'R', right: 'L' }
 
 function detectModelParams() {
   const core = model?.internalModel?.coreModel
@@ -563,8 +611,46 @@ function detectModelParams() {
     } catch { /* 没有这组 API */ }
   }
   modelParams = out
+  // AI 设计挥手、踢腿、跳舞时需要的不只是参数名，还需要大致范围和默认值。
+  const paramMeta = {}
+  const parameterIds = Array.isArray(core?._parameterIds) ? core._parameterIds : []
+  const parameterIndex = new Map(parameterIds.map((id, index) => [String(id), index]))
+  for (const id of [...out].slice(0, 300)) {
+    try {
+      const index = parameterIndex.get(id)
+      const callByKeyOrIndex = (methodName, fallback) => {
+        const method = core?.[methodName]
+        if (typeof method === 'function') {
+          for (const key of [id, index]) {
+            try {
+              const value = Number(method.call(core, key))
+              if (Number.isFinite(value)) return value
+            } catch { /* 换参数索引再试 */ }
+          }
+        }
+        return Number(fallback?.[index])
+      }
+      const min = callByKeyOrIndex('getParameterMinimumValue', core?._parameterMinimumValues)
+      const max = callByKeyOrIndex('getParameterMaximumValue', core?._parameterMaximumValues)
+      const defaultValue = callByKeyOrIndex('getParameterDefaultValue', core?._parameterDefaultValues ?? core?._parameterValues)
+      if ([min, max, defaultValue].some(Number.isFinite)) {
+        paramMeta[id] = {
+          min: Number.isFinite(min) ? min : null,
+          max: Number.isFinite(max) ? max : null,
+          default: Number.isFinite(defaultValue) ? defaultValue : null,
+        }
+      }
+    } catch { /* 不同 Core 版本没有这些查询方法 */ }
+  }
+  modelParamMeta = paramMeta
   // 把这只模型真实有的参数报给宿主：AI 设计新动作前先看它，别写不存在的参数名
-  report({ type: 'state', phase: 'model-params', count: out.size, params: [...out].slice(0, 300) })
+  report({
+    type: 'state',
+    phase: 'model-params',
+    count: out.size,
+    params: [...out].slice(0, 300),
+    paramMeta,
+  })
   // 每个动作在这个模型上能落到几轨（缺的全跳），设置页据此把「做不了」的试玩按钮置灰
   try {
     report({ type: 'state', phase: 'model-capability', actions: computeActionSupport() })
@@ -623,6 +709,99 @@ function resolveParam(name) {
   return null
 }
 
+function captureDrawableVertices(core) {
+  const out = []
+  try {
+    const count = Number(core?.getDrawableCount?.()) || 0
+    for (let index = 0; index < count; index += 1) {
+      const vertices = core.getDrawableVertices?.(index)
+      if (vertices?.length) out.push(Float32Array.from(vertices))
+    }
+  } catch { /* 当前 Core 不提供顶点读取 */ }
+  return out
+}
+
+function probeArmScreenSide(core, logical) {
+  const actual = resolveParam(logical)
+  if (!core || !actual || typeof core.setParameterValueById !== 'function') return null
+  let current = 0
+  try { current = Number(core.getParameterValueById(actual)) || 0 } catch { return null }
+  const meta = modelParamMeta?.[actual] ?? {}
+  const min = Number.isFinite(Number(meta.min)) ? Number(meta.min) : -1
+  const max = Number.isFinite(Number(meta.max)) ? Number(meta.max) : 1
+  const target = Math.abs(max - current) >= Math.abs(current - min) ? max : min
+  if (Math.abs(target - current) < 0.01) return null
+  const before = captureDrawableVertices(core)
+  if (!before.length) return null
+  let changedX = 0
+  let changed = 0
+  let minX = Infinity
+  let maxX = -Infinity
+  for (const vertices of before) {
+    for (let index = 0; index + 1 < vertices.length; index += 2) {
+      const x = Number(vertices[index])
+      if (Number.isFinite(x)) {
+        minX = Math.min(minX, x)
+        maxX = Math.max(maxX, x)
+      }
+    }
+  }
+  try {
+    core.setParameterValueById(actual, target)
+    core.update()
+    const after = captureDrawableVertices(core)
+    for (let i = 0; i < Math.min(before.length, after.length); i += 1) {
+      const a = before[i]
+      const b = after[i]
+      for (let index = 0; index + 1 < Math.min(a.length, b.length); index += 2) {
+        const dx = Number(b[index]) - Number(a[index])
+        const dy = Number(b[index + 1]) - Number(a[index + 1])
+        if (dx * dx + dy * dy > 0.0004) {
+          changedX += Number(a[index])
+          changed += 1
+        }
+      }
+    }
+  } catch {
+    return null
+  } finally {
+    try {
+      core.setParameterValueById(actual, current)
+      core.update()
+    } catch { /* 恢复失败时回到默认值 */ }
+  }
+  if (!changed || !Number.isFinite(minX) || !Number.isFinite(maxX)) return null
+  const centerX = (minX + maxX) / 2
+  const meanX = changedX / changed
+  return { actual, side: meanX < centerX ? 'left' : 'right', changed, meanX, centerX }
+}
+
+function calibrateArmScreenSides(core) {
+  const leftProbe = probeArmScreenSide(core, 'shoulderL')
+  const rightProbe = probeArmScreenSide(core, 'shoulderR')
+  const next = { left: 'R', right: 'L' }
+  let calibrated = false
+  // 不同模型的手臂高度和镜头裁切会改变“相对中心”的判断，但左右两条手臂
+  // 位移顶点的平均 X 一定有稳定先后关系。优先使用相对关系，再做中心兜底。
+  if (leftProbe && rightProbe && Math.abs(leftProbe.meanX - rightProbe.meanX) > 0.0001) {
+    if (leftProbe.meanX < rightProbe.meanX) {
+      next.left = 'L'
+      next.right = 'R'
+    }
+    calibrated = true
+  } else if (leftProbe?.side === 'left' && rightProbe?.side === 'right') {
+    next.left = 'L'
+    next.right = 'R'
+    calibrated = true
+  } else if (leftProbe?.side === 'right' && rightProbe?.side === 'left') {
+    next.left = 'R'
+    next.right = 'L'
+    calibrated = true
+  }
+  armSideMap = next
+  return { ...next, calibrated, leftProbe, rightProbe }
+}
+
 function compileCustomAction(def, core = null) {
   const tracks = []
   for (const track of def?.tracks ?? []) {
@@ -635,17 +814,54 @@ function compileCustomAction(def, core = null) {
       try { cur = Number(core?.getParameterValueById(id)) || 0 } catch { cur = 0 }
       keys = [[keys[0][0], cur], ...keys.slice(1)]
     }
-    keys = keys.map(([t, v]) => [t, v === 'current' ? 0 : v])
+    const meta = modelParamMeta?.[id] ?? null
+    const span = meta ? Math.abs(Number(meta.max) - Number(meta.min)) : 0
+    const logical = String(track.param)
+    // 有些模型把肩肘腕写成 -1~1 比例，另一些写成角度。同一动作定义在比例模型上按范围换算，
+    // 避免把 ±40 原样写进 -1~1 参数后只剩一个被硬夹住的最大值。
+    const ratioTrack = /^(?:head|body|hip|shoulder|elbow|wrist|arm|hand|leg)/.test(logical) && span > 0 && span <= 2
+    const ratioLimit = ratioTrack
+      ? Math.max(Math.abs(Number(meta.min) || 0), Math.abs(Number(meta.max) || 0), 1)
+      : 0
+    keys = keys.map(([t, v]) => [
+      t,
+      v === 'current'
+        ? 0
+        : ratioTrack && Math.abs(Number(v)) > 1
+          ? (Number(v) / 40) * ratioLimit
+          : v,
+    ])
     tracks.push({ id, keys })
   }
-  return { duration: Math.max(200, Number(def?.durationMs) || 1000), tracks, hold: def?.hold === true, label: def?.label ?? '' }
+  return {
+    duration: Math.max(200, Number(def?.durationMs) || 1000),
+    tracks,
+    hold: def?.hold === true,
+    repeat: Math.max(1, Math.min(6, Math.round(Number(def?.repeat) || 1))),
+    label: def?.label ?? '',
+  }
 }
 
 let animState = null
-// hold 类动作（换装/开关/表情贴图）设完保持，再点一次回到原值
-let heldState = null
+// hold 类动作（换装/开关/表情贴图）按动作分别保持。相同参数由最后执行的动作接管，
+// 不同参数骨架（例如面部表情 + 衣服开关）可以共存。
+let heldStates = new Map()
 let restoreState = null
 let paramHookInstalled = false
+
+function mergeHeldActionStates(current, action, items, preserveIndependent = true) {
+  const next = new Map(preserveIndependent ? current : [])
+  if (preserveIndependent) {
+    const owned = new Set(items.map((item) => item.id))
+    for (const [key, state] of [...next]) {
+      const remaining = state.items.filter((item) => !owned.has(item.id))
+      if (remaining.length) next.set(key, { ...state, items: remaining })
+      else next.delete(key)
+    }
+  }
+  next.set(action, { action, items })
+  return next
+}
 
 function sampleKeys(keys, t) {
   if (!keys.length) return 0
@@ -678,14 +894,15 @@ function applyAnimParams() {
     const done = animState.action
     if (hold) {
       // 换装/开关：把终值记住，之后每帧写回（否则会被 idle/眨眼自带参数覆盖）
-      heldState = {
-        action: done,
-        items: tracks.map((track) => ({
+      if (!settings.preserveIndependentHolds) {
+        for (const state of heldStates.values()) restoreState = restoreTracks(animState.core, state.items)
+      }
+      const items = tracks.map((track) => ({
           id: track.id,
           value: track.keys[track.keys.length - 1][1],
           prev: track.keys[0][1],
-        })),
-      }
+        }))
+      heldStates = mergeHeldActionStates(heldStates, done, items, settings.preserveIndependentHolds)
     }
     animState = null
     report({ type: 'anim-done', action: done })
@@ -714,10 +931,30 @@ function applyRestoreParams() {
 
 /** 每帧最后写 hold 值：压住 idle/眨眼等自带参数，保证换装状态不被冲掉。 */
 function applyHeldParams(core) {
-  if (!heldState) return
-  for (const item of heldState.items) {
-    try { core.setParameterValueById(item.id, item.value) } catch { /* 参数不存在 */ }
+  if (!heldStates.size) return
+  for (const state of heldStates.values()) {
+    for (const item of state.items) {
+      try { core.setParameterValueById(item.id, item.value) } catch { /* 参数不存在 */ }
+    }
   }
+}
+
+function releaseHeldAction(core, action) {
+  const state = heldStates.get(action)
+  if (!state) return false
+  heldStates.delete(action)
+  restoreState = restoreTracks(core, state.items)
+  restoreState.startedAt = performance.now()
+  return true
+}
+
+function releaseAllHeldActions(core) {
+  if (!heldStates.size) return false
+  const items = [...heldStates.values()].flatMap((state) => state.items)
+  heldStates.clear()
+  restoreState = restoreTracks(core, items)
+  restoreState.startedAt = performance.now()
+  return true
 }
 
 /** 挂到 coreModel.update 前：保证写的参数在同一帧生效。 */
@@ -779,35 +1016,44 @@ function expandAnimTracks(tracks, repeat) {
   return out
 }
 
-function playAnimation(action, override = null) {
+function applyActionPerformance(anim, performanceProfile) {
+  if (!anim || anim.hold || !performanceProfile) return anim
+  const speed = Math.max(0.65, Math.min(1.45, Number(performanceProfile.speed) || 1))
+  const amplitude = Math.max(0.6, Math.min(1.45, Number(performanceProfile.amplitude) || 1))
+  return {
+    ...anim,
+    duration: Math.max(200, Math.round((Number(anim.duration) || 1000) / speed)),
+    tracks: (anim.tracks ?? []).map((track) => {
+      const keys = Array.isArray(track.keys) ? track.keys : []
+      const pivot = Number(keys[0]?.[1]) || 0
+      return {
+        ...track,
+        keys: keys.map(([t, value]) => [t, pivot + (Number(value) - pivot) * amplitude]),
+      }
+    }),
+  }
+}
+
+function playAnimation(action, override = null, performanceProfile = null) {
   const custom = customActions.get(action)
   const core = model?.internalModel?.coreModel
-  const anim = override ?? ANIMS[action] ?? (custom ? compileCustomAction(custom, core) : null)
+  const baseAnim = override ?? ANIMS[action] ?? (custom ? compileCustomAction(custom, core) : null)
+  const anim = applyActionPerformance(baseAnim, performanceProfile)
   if (!anim || !core) return false
   if (action === 'idle' || anim.duration === 0) {
     animState = null
-    // 「停止动作」也要结束表情/换装等 hold 状态；否则 idle 只停普通关键帧，
-    // 模型仍会保持上一个能力动作。
-    if (heldState) {
-      restoreState = restoreTracks(core, heldState.items)
-      heldState = null
-    }
+    // 「停止动作」结束全部保持状态。
+    releaseAllHeldActions(core)
     report({ type: 'anim-done', action })
     return true
   }
   // 换装/开关类：第一次点 → 切到目标并保持；同一个再点一次 → 恢复原样
   if (anim.hold) {
-    if (heldState?.action === action) {
-      restoreState = restoreTracks(core, heldState.items)
-      heldState = null
-      restoreState.startedAt = performance.now()
+    if (releaseHeldAction(core, action)) {
       report({ type: 'anim-done', action })
       return true
     }
-    if (heldState) {
-      restoreState = restoreTracks(core, heldState.items)
-      heldState = null
-    }
+    if (!settings.preserveIndependentHolds) releaseAllHeldActions(core)
   }
   animState = {
     action,
@@ -818,6 +1064,206 @@ function playAnimation(action, override = null) {
     hold: anim.hold === true,
   }
   return true
+}
+
+let posePreviewParams = new Set()
+let poseEditorActive = false
+let poseEditorFrozen = null
+let poseEditorLayoutOffset = 0
+let armCalibration = null
+
+/**
+ * 右侧参数栏占用的是模型可见区域；编辑时把模型在剩余区域重新水平居中。
+ * 收起参数栏或关闭设计器后，偏移会自动归零。
+ */
+function applyPoseEditorLayout() {
+  if (!model) return poseEditorLayoutOffset
+  if (!poseEditorActive) {
+    poseEditorLayoutOffset = 0
+    model.x = baseModelX
+    return 0
+  }
+  const sidebar = document.getElementById('pose-editor-sidebar')
+  const rect = sidebar?.getBoundingClientRect?.()
+  const visibleRight = rect && rect.width > 0 ? rect.left : (window.innerWidth || 0)
+  const W = window.innerWidth || app?.renderer?.width || 0
+  poseEditorLayoutOffset = Math.max(0, Math.round((W - visibleRight) / 2))
+  model.x = baseModelX - poseEditorLayoutOffset
+  try { window.dispatchEvent(new CustomEvent('live2d-pose-layout')) } catch { /* 旧内核 */ }
+  return poseEditorLayoutOffset
+}
+
+/** 清掉不再参与当前姿势的参数，避免切到空姿势后上一步的骨架值一直挂着。 */
+function preparePosePreview(nextNames = []) {
+  const core = model?.internalModel?.coreModel
+  const next = new Set(nextNames)
+  if (core) {
+    for (const logical of posePreviewParams) {
+      if (next.has(logical)) continue
+      const actual = resolveParam(logical)
+      if (!actual) continue
+      const fallback = Number(modelParamMeta?.[actual]?.default ?? 0)
+      try { core.setParameterValueById(actual, Number.isFinite(fallback) ? fallback : 0) } catch { /* 参数已移除 */ }
+    }
+  }
+  posePreviewParams = next
+}
+
+function resetPosePreview() {
+  preparePosePreview([])
+  return playAnimation('idle', null, null)
+}
+
+/**
+ * 编辑姿势时冻结一切时间驱动：待机浮动、视线、呼吸、眨眼、物理和内置动作。
+ * 参数仍由姿势设计桥接主动写入，所以拖骨架和参数微调能立即反馈。
+ */
+function setPoseEditorActive(active) {
+  const inner = model?.internalModel
+  if (active === true) {
+    if (!poseEditorActive && inner) {
+      poseEditorFrozen = {
+        breath: inner.breath,
+        eyeBlink: inner.eyeBlink,
+        physics: inner.physics,
+        pose: inner.pose,
+      }
+      try { inner.motionManager?.stopAllMotions?.() } catch { /* 当前版本无公开方法 */ }
+      try { inner.motionManager?._stopAllMotions?.() } catch { /* 忽略 */ }
+      try { inner.motionManager?.expressionManager?.stopAllExpressions?.() } catch { /* 忽略 */ }
+      inner.breath = null
+      inner.eyeBlink = null
+      inner.physics = null
+      inner.pose = null
+      try { inner.focusController?.focus?.(0, 0, true) } catch { /* 居中焦点 */ }
+      armCalibration = calibrateArmScreenSides(inner.coreModel)
+      if (model) model.y = baseModelY
+      heldStates.clear()
+      restoreState = null
+      if (audioEl) {
+        try { audioEl.pause() } catch { /* 已结束 */ }
+        audioEl = null
+      }
+      speaking = { active: false, startedAt: 0 }
+    }
+    poseEditorActive = true
+    setIgnore(false)
+    applyPoseEditorLayout()
+  } else {
+    poseEditorActive = false
+    if (poseEditorFrozen && inner) {
+      inner.breath = poseEditorFrozen.breath
+      inner.eyeBlink = poseEditorFrozen.eyeBlink
+      inner.physics = poseEditorFrozen.physics
+      inner.pose = poseEditorFrozen.pose
+    }
+    poseEditorFrozen = null
+    applyPoseEditorLayout()
+  }
+  return {
+    active: poseEditorActive,
+    frozen: Boolean(poseEditorFrozen),
+    ignoringMouse,
+    offset: poseEditorLayoutOffset,
+    armSides: { ...armSideMap },
+    armCalibration,
+  }
+}
+
+window.Live2DPoseEditorBridge = {
+  resolveParam(name) {
+    return resolveParam(name)
+  },
+  getContext() {
+    const bounds = (() => {
+      try {
+        const box = model?.getBounds?.()
+        return box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null
+      } catch { return null }
+    })()
+    return {
+      params: [...modelParams],
+      paramMeta: modelParamMeta ?? {},
+      capabilities: (settings.presets?.actions ?? []).filter((item) => item.capability === true),
+      capabilitiesByGroup: (settings.presets?.actions ?? []).filter((item) => item.capability === true).reduce((acc, item) => {
+        const key = item.group || 'other'
+        ;(acc[key] ??= []).push(item)
+        return acc
+      }, {}),
+      bounds,
+      resolveParam,
+      armSides: { ...armSideMap },
+      currentValue(name) {
+        const actual = resolveParam(name)
+        if (!actual) return null
+        try { return Number(model.internalModel.coreModel.getParameterValueById(actual)) } catch { return null }
+      },
+    }
+  },
+  previewPose(params, durationMs = 600000) {
+    const entries = Object.entries(params ?? {})
+      .map(([param, value]) => ({ actual: resolveParam(param), value: Number(value) || 0 }))
+      .filter((entry) => entry.actual)
+    const names = entries.map((entry) => entry.actual)
+    if (!names.length) return resetPosePreview()
+    preparePosePreview(names)
+    const tracks = entries.map(({ actual, value }) => ({
+      id: actual,
+      keys: [[0, value], [1, value]],
+    }))
+    return playAnimation('__pose_edit_live__', { duration: durationMs, tracks }, null)
+  },
+  previewDraft(draft) {
+    const tracks = (Array.isArray(draft?.tracks) ? draft.tracks : [])
+      .map((track) => ({
+        id: resolveParam(track?.param),
+        keys: Array.isArray(track?.keys) ? track.keys : [],
+      }))
+      .filter((track) => track.id && track.keys.length)
+    preparePosePreview(tracks.map((track) => track.id))
+    return playAnimation(String(draft?.id || '__pose_edit_preview__'), {
+      duration: Math.max(200, Number(draft?.durationMs) || 2000),
+      tracks,
+      hold: false,
+      repeat: 1,
+    }, null)
+  },
+  stopPreview() {
+    return resetPosePreview()
+  },
+  setEditorActive(active) {
+    return setPoseEditorActive(active)
+  },
+  setEditorIgnore(ignore) {
+    return setIgnore(ignore === true)
+  },
+  layoutEditor() {
+    return applyPoseEditorLayout()
+  },
+  getEditorState() {
+    return {
+      active: poseEditorActive,
+      frozen: Boolean(poseEditorFrozen),
+      ignoringMouse,
+      offset: poseEditorLayoutOffset,
+      armSides: { ...armSideMap },
+      armCalibration,
+    }
+  },
+  saveDraft(draft) {
+    report({ type: 'pose-save', draft })
+  },
+  setEditorBounds(expanded, original = null) {
+    if (expanded) {
+      const width = Math.min(860, Math.max(620, Math.round(window.screen.availWidth * 0.55)))
+      const height = Math.min(940, Math.max(680, window.screen.availHeight - 80))
+      const x = Math.max(20, Math.round((window.screen.availWidth - width) / 2))
+      const y = Math.max(20, Math.round((window.screen.availHeight - height) / 2))
+      api.setBounds?.({ x, y, width, height })
+    } else if (original) {
+      api.setBounds?.(original)
+    }
+  },
 }
 
 async function renderModel(modelInfo) {
@@ -972,6 +1418,19 @@ function relativeTime(value) {
   return `${Math.round(seconds / 86400)} 天前`
 }
 
+function moodEventText(events) {
+  const rows = Array.isArray(events) ? events.slice(-3) : []
+  if (!rows.length) return '今天还没有明显变化'
+  return rows.map((item) => {
+    const at = new Date(Number(item.at) || 0)
+    const time = Number.isFinite(at.getTime())
+      ? `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+      : '--:--'
+    const delta = Number(item.delta) || 0
+    return `${time} ${delta >= 0 ? '+' : ''}${Math.round(delta * 100)} ${item.reason || '情绪变化'}`
+  }).join('；')
+}
+
 function presetStatusRows() {
   const life = settings.life
   if (!life) return [menuStatusRow('状态', '生命感循环尚未启动')]
@@ -1004,7 +1463,8 @@ function presetStatusRows() {
     menuStatusRow('观众', { absent: '不在场', ambient: '背景中', attentive: '正在看', present: '在场' }[life.audience] ?? '未知'),
     menuStatusRow('表达意愿', statusLabel(life.willingness)),
     menuStatusRow('精力', `${Math.round((Number(life.energy) || 0) * 100)}%`),
-    menuStatusRow('心情', `${Math.round((Number(life.mood) || 0) * 100)}`),
+    menuStatusRow('心情', `${Math.round((Number(life.mood) || 0) * 100)}${life.moodReason ? ` · ${life.moodReason}` : ''}`),
+    menuStatusRow('今日心情', moodEventText(life.moodEvents)),
     menuStatusRow('无聊度', `${Math.round((Number(life.boredom) || 0) * 100)}%`),
     menuStatusRow('亲密度', `${Math.round((Number(life.closeness) || 0) * 100)}%`),
     menuStatusRow('今日主动', `${life.dailyShare || 0}/${life.dailyShareMax || 0} 分享 · ${life.dailyImportant || 0}/${life.dailyImportantMax || 0} 重要`),
@@ -1015,6 +1475,16 @@ function presetStatusRows() {
     menuStatusRow('双模型关系', life.dualRelationEnabled === false ? '关闭' : `${Math.round((Number(life.peerAffinity) || 0) * 100)}%`),
     menuStatusRow('陪伴记忆', life.memoryEnabled === true ? '开启（按对话）' : '关闭'),
   ]
+}
+
+function presetStatusGroups() {
+  const rows = presetStatusRows()
+  return [
+    { label: '身心状态', rows: rows.slice(0, 6) },
+    { label: '心情明细', rows: [rows[6], rows[11], rows[12]] },
+    { label: '互动关系', rows: [rows[7], rows[8], rows[9], rows[10], rows[14], rows[15]] },
+    { label: '主动感知', rows: [rows[13]] },
+  ].filter((group) => group.rows.every(Boolean))
 }
 
 function positionPresetSubmenu(group) {
@@ -1155,7 +1625,11 @@ function renderPresetMenu() {
       menuRow({ ui: 'stop-loop' }, '停止循环', active ? '立即' : '未运行'),
     ],
   ))
-  menu.appendChild(menuGroup('状态', '生命感', presetStatusRows()))
+  menu.appendChild(menuGroup(
+    '状态',
+    '生命感',
+    presetStatusGroups().map((group) => menuSubGroup(group.label, `${group.rows.length}`, group.rows)),
+  ))
   for (const group of menu.querySelectorAll('.menu-group')) {
     group.addEventListener('mouseenter', () => openPresetSubmenu(group))
     group.addEventListener('mouseleave', () => schedulePresetSubmenuClose(group))
@@ -1268,6 +1742,7 @@ async function handleInit(command) {  const config = command.config ?? {}
   settings.dragInertia = config.dragInertia !== false
   settings.motionStrength = clampPct(config.motionStrength, 1, 100, 60)
   settings.autoInteract = config.autoInteract !== false
+  settings.preserveIndependentHolds = config.preserveIndependentHolds !== false
   settings.idlePresets = config.idlePresets !== false
   // 0.13.0：模式与唤醒状态（工具栏按钮）
   settings.mode = MODE_ORDER.includes(config.mode) ? config.mode : 'auto'
@@ -1339,6 +1814,61 @@ function showBubble(command) {
 async function handleCommand(command) {
   if (!command || typeof command !== 'object') return
   if (typeof command.instanceId === 'string' && command.instanceId) currentInstanceId = command.instanceId
+  if (command.type === 'debug-interactive') {
+    const x = Number(command.x) || 0
+    const y = Number(command.y) || 0
+    const element = document.elementFromPoint(x, y)
+    handlePointerMove(x, y)
+    report({
+      type: 'state',
+      phase: 'interactive-probe',
+      id: command.id ?? null,
+      x,
+      y,
+      interactive: isInteractiveAt(x, y),
+      ignoringMouse,
+      element: element ? { tag: element.tagName, id: element.id || null, cls: element.className || null } : null,
+    })
+    return
+  }
+  if (command.type === 'debug-pose-editor') {
+    const result = window.Live2DPoseEditor?.debug?.(command) ?? { open: false }
+    report({ type: 'pose-editor-debug', id: command.id ?? null, result })
+    return
+  }
+  if (command.type === 'pose-editor-open') {
+    window.Live2DPoseEditor?.open(command)
+    return
+  }
+  if (command.type === 'pose-save-result') {
+    window.Live2DPoseEditor?.onSaveResult(command)
+    return
+  }
+  // 姿势编辑期间模型保持静态：后台动作和视线指令不打断当前姿势。
+  if (poseEditorActive && (command.type === 'anim' || command.type === 'look-at' || command.type === 'farewell')) {
+    if (command.type === 'anim') {
+      report({ type: 'anim-done', action: String(command.action || 'idle'), suppressed: 'pose-editor' })
+    }
+    return
+  }
+  if (command.type === 'debug-hold-check') {
+    const face = [{ id: 'ParamMouthForm', value: 0.8, prev: 0 }]
+    const clothes = [{ id: 'Clothes1', value: 1, prev: 0 }]
+    const merged = mergeHeldActionStates(
+      mergeHeldActionStates(new Map(), 'face-demo', face, true),
+      'cap-demo',
+      clothes,
+      settings.preserveIndependentHolds,
+    )
+    report({
+      type: 'state',
+      phase: 'hold-check',
+      heldActions: [...merged.keys()],
+      heldParameters: [...merged.values()].flatMap((state) => state.items.map((item) => item.id)),
+      preserveIndependentHolds: settings.preserveIndependentHolds === true,
+    })
+    return
+  }
   // 诊断用：让探针能直接打开菜单（生产里只有宿主能发命令，不对外暴露）
   if (command.type === 'debug-menu') {
     if (command.which === 'mode') openModeMenu()
@@ -1365,12 +1895,26 @@ async function handleCommand(command) {
         phase: 'preset-menu',
         groups: [...(els.presetMenu?.querySelectorAll(':scope > .menu-group > .menu-parent > span:first-child') ?? [])]
           .map((node) => node.textContent),
-        actionGroups: [...(els.presetMenu?.querySelectorAll('.menu-subgroup > .menu-parent > span:first-child') ?? [])]
-          .map((node) => node.textContent),
-        actionEntries: [
-          ...(els.presetMenu?.querySelectorAll('.menu-group > .submenu > .menu-subgroup > .menu-parent > span:first-child') ?? []),
-          ...(els.presetMenu?.querySelectorAll('.menu-group > .submenu > .menu-item[data-action="idle"] > span:first-child') ?? []),
-        ].map((node) => node.textContent),
+        actionGroups: (() => {
+          const groups = [...(els.presetMenu?.querySelectorAll(':scope > .menu-group') ?? [])]
+          const action = groups.find((group) => group.dataset.menuLabel === '动作')
+          return [...(action?.querySelectorAll(':scope > .submenu > .menu-subgroup > .menu-parent > span:first-child') ?? [])]
+            .map((node) => node.textContent)
+        })(),
+        actionEntries: (() => {
+          const groups = [...(els.presetMenu?.querySelectorAll(':scope > .menu-group') ?? [])]
+          const action = groups.find((group) => group.dataset.menuLabel === '动作')
+          return [
+            ...(action?.querySelectorAll(':scope > .submenu > .menu-subgroup > .menu-parent > span:first-child') ?? []),
+            ...(action?.querySelectorAll(':scope > .submenu > .menu-item[data-action="idle"] > span:first-child') ?? []),
+          ].map((node) => node.textContent)
+        })(),
+        statusGroups: (() => {
+          const groups = [...(els.presetMenu?.querySelectorAll(':scope > .menu-group') ?? [])]
+          const status = groups.find((group) => group.dataset.menuLabel === '状态')
+          return [...(status?.querySelectorAll(':scope > .submenu > .menu-subgroup > .menu-parent > span:first-child') ?? [])]
+            .map((node) => node.textContent)
+        })(),
         loopEntries: [...((els.presetMenu?.querySelectorAll(':scope > .menu-group') ?? [])[1]?.querySelectorAll(':scope > .submenu > .menu-item') ?? [])]
           .map((node) => node.querySelector('span:first-child')?.textContent)
           .filter(Boolean),
@@ -1379,6 +1923,7 @@ async function handleCommand(command) {
           return nested ? getComputedStyle(nested).position : null
         })(),
         menuCloseDelayMs: PRESET_MENU_CLOSE_DELAY_MS,
+        preserveIndependentHolds: settings.preserveIndependentHolds === true,
         menuGeometry: {
           root: menuRect,
           second: secondRect,
@@ -1498,7 +2043,7 @@ async function handleCommand(command) {
   }
   if (command.type === 'anim') {
     const raw = String(command.action || 'idle').toLowerCase()
-    playAnimation(ANIM_ALIASES[raw] || raw)
+    playAnimation(ANIM_ALIASES[raw] || raw, null, command.performance ?? null)
     return
   }
   if (command.type === 'say') {
@@ -1616,6 +2161,9 @@ async function handleCommand(command) {
     if (typeof patch.lookFollow === 'boolean') settings.lookFollow = patch.lookFollow
     if (typeof patch.dragInertia === 'boolean') settings.dragInertia = patch.dragInertia
     if (Number.isFinite(patch.motionStrength)) settings.motionStrength = clampPct(patch.motionStrength, 1, 100, 60)
+    if (typeof patch.autoInteract === 'boolean') settings.autoInteract = patch.autoInteract
+    if (typeof patch.idlePresets === 'boolean') settings.idlePresets = patch.idlePresets
+    if (typeof patch.preserveIndependentHolds === 'boolean') settings.preserveIndependentHolds = patch.preserveIndependentHolds
     if (typeof patch.idleFloat === 'boolean' && !patch.idleFloat && model) model.y = baseModelY
     if (Number.isFinite(patch.windowWidth) && Number.isFinite(patch.windowHeight)) {
       app?.renderer?.resize(patch.windowWidth, patch.windowHeight)
@@ -2130,7 +2678,7 @@ els.chatInput?.addEventListener('keydown', (event) => {
 
 function isInteractiveAt(x, y) {
   const element = document.elementFromPoint(x, y)
-  if (element && element.closest('#toolbar, #placeholder, .bubble, #adjust, #composer, #reply, .reply-item, #mode-menu, #preset-menu')) return true
+  if (element && element.closest('#pose-editor, #toolbar, #placeholder, .bubble, #adjust, #composer, #reply, .reply-item, #mode-menu, #preset-menu')) return true
   // 0.13.0：允许「模型区域也穿透」——置顶时不再挡住下面的按钮；代价是此时摸不到模型
   if (settings.modelPassthrough === true) return false
   if (model) {
@@ -2298,6 +2846,12 @@ function handlePointerMove(x, y) {
     tapHoldTimer = null
     tapStart = null
   }
+  // 姿势设计器覆盖窗口时必须始终可交互。设计器面板并不总在模型矩形内，
+  // 如果继续走下面的透明区判定，会把整个窗口重新切回鼠标穿透，按钮和骨架都点不到。
+  if (document.body.classList.contains('pose-editing')) {
+    setIgnore(false)
+    return
+  }
   // 右键菜单 / 模式下拉开着就别穿透：菜单项要能点
   if (menuOpen || modeMenuOpen) {
     setIgnore(false)
@@ -2353,6 +2907,10 @@ document.addEventListener('mousemove', (event) => {
 // 光标离开窗口：交回穿透（拖动中除外，否则拖到窗口外会断）
 document.addEventListener('mouseleave', () => {
   if (drag) return
+  if (document.body.classList.contains('pose-editing')) {
+    setIgnore(false)
+    return
+  }
   if (settings.adjustMode) scheduleHideAdjust(300)
   else setIgnore(true)
 })
@@ -2394,6 +2952,8 @@ function modelHitAt(x, y) {
 
 document.addEventListener('pointerdown', (event) => {
   if (event.button !== 0 || drag) return
+  // 设计器自己的按钮和骨架控制点由编辑层处理；不能顺带触发模型的摸头/双击。
+  if (document.body.classList.contains('pose-editing')) return
   // 右键菜单开着时，点模型只负责关菜单，不触发摸头/动作
   if (menuOpen) { closePresetMenu(); return }
   if (event.target.closest('#toolbar, #composer, #reply, #adjust, #instance-title, #mode-menu, #preset-menu')) return

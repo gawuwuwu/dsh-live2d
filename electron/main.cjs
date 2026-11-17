@@ -666,9 +666,17 @@ function handleCommand(command) {
       if (!entry.win.isVisible()) entry.win.showInactive()
       entry.win.webContents.invalidate()
     } catch { /* ignore */ }
+    const captureRect = command.rect && ['x', 'y', 'width', 'height'].every((key) => Number.isFinite(Number(command.rect[key])))
+      ? {
+        x: Math.max(0, Math.round(Number(command.rect.x))),
+        y: Math.max(0, Math.round(Number(command.rect.y))),
+        width: Math.max(1, Math.round(Number(command.rect.width))),
+        height: Math.max(1, Math.round(Number(command.rect.height))),
+      }
+      : undefined
     setTimeout(() => {
       entry.win.webContents
-        .capturePage()
+        .capturePage(captureRect)
         .then((image) => report({ type: 'screenshot', instanceId, id, ok: true, base64: image.toPNG().toString('base64') }))
         .catch((error) => report({ type: 'screenshot', instanceId, id, ok: false, error: error && error.message }))
     }, 250)

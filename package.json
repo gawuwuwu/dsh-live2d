@@ -1,12 +1,12 @@
 {
   "name": "dsh-live2d-plugin",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": false,
   "type": "module",
   "main": "index.js",
   "license": "MIT",
   "author": "gawuwuwu",
-  "description": "Live2D desktop pet for DeepSeek Harness: multi-instance transparent always-on-top windows, chat bubbles, AI-controlled expressions and motions, screen reading, TTS with lip sync, and proactive wake-up.",
+  "description": "Live2D desktop pet for DeepSeek Harness: multi-instance transparent always-on-top windows, chat bubbles, AI-controlled expressions and motions, in-window pose editor, screen reading, TTS with lip sync, and proactive wake-up.",
   "keywords": [
     "deepseek-harness",
     "dsh",

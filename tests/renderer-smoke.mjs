@@ -11,10 +11,9 @@ import { pathToFileURL } from 'node:url'
 const pluginDir = path.resolve(import.meta.dirname, '..')
 const mod = await import(pathToFileURL(path.join(pluginDir, 'index.js')).href)
 
-// 需要真实模型才能跑：设置 LIVE2D_MODEL_DIR 指向含 .model3.json 的模型目录
-const modelPath = process.env.LIVE2D_MODEL_DIR || ''
-if (!modelPath || !fs.existsSync(modelPath)) {
-  console.error('SKIP renderer-smoke：未设置 LIVE2D_MODEL_DIR（含 .model3.json 的模型目录）')
+const modelPath = process.env.LIVE2D_SMOKE_MODEL || process.argv[2] || ''
+if (!modelPath) {
+  console.log('SKIP  renderer-smoke：请通过 LIVE2D_SMOKE_MODEL 或第一个参数传入本地测试模型目录')
   process.exit(0)
 }
 const model = mod.modelProbe(modelPath)
@@ -28,8 +27,14 @@ const config = {
   // 顺手覆盖预设动作路径：init 里带 presets，applyPresets/右键菜单初始化不能抛错
   presets: {
     actions: [
-      { id: 'auto-demo', label: '自动动作', kind: 'custom', auto: true, durationMs: 600, tracks: [{ param: 'headY', keys: [[0, 0], [0.5, 4], [1, 0]] }] },
-      { id: 'cap-demo', label: '模型自带', kind: 'custom', capability: true, hold: true, durationMs: 600, tracks: [{ param: 'headZ', keys: [[0, 'current'], [1, 8]] }] },
+      { id: 'auto-demo', label: '自动动作', kind: 'custom', auto: true, durationMs: 120, tracks: [{ param: 'headY', keys: [[0, 0], [0.5, 4], [1, 0]] }] },
+      { id: 'cap-demo', label: '模型自带', kind: 'custom', capability: true, hold: true, durationMs: 120, tracks: [{ param: 'headZ', keys: [[0, 'current'], [1, 8]] }] },
+      { id: 'face-demo', label: '面部保持', kind: 'custom', hold: true, durationMs: 120, tracks: [{ param: 'mouthForm', keys: [[0, 0], [1, 0.8]] }] },
+      { id: 'ratio-wave', label: '三段挥手', kind: 'custom', durationMs: 120, tracks: [
+        { param: 'shoulderR', keys: [[0, 0], [0.5, -40], [1, 0]] },
+        { param: 'elbowR', keys: [[0, 0], [0.5, 38], [1, 0]] },
+        { param: 'wristR', keys: [[0, 0], [0.5, 34], [1, 0]] },
+      ] },
       { id: 'wave', label: '挥手', kind: 'custom', durationMs: 600, tracks: [{ param: 'headZ', keys: [[0, 0], [0.5, 8], [1, 0]] }] },
     ],
     sequences: [
@@ -38,6 +43,20 @@ const config = {
     ],
   },
 }
+const capabilityScan = mod.scanModelCapability(modelPath)
+const chestMotion = capabilityScan.motions?.find((item) => item.label === '抚胸')
+if (chestMotion) {
+  config.presets.actions.push({
+    id: 'motion-chest-test',
+    label: chestMotion.label,
+    kind: 'custom',
+    capability: true,
+    hold: true,
+    durationMs: chestMotion.durationMs,
+    tracks: chestMotion.tracks,
+  })
+}
+const chestScreenshotPath = process.env.LIVE2D_CHEST_SCREENSHOT || ''
 const life = {
   attention: 'focused', willingness: 'social', energy: 0.72, mood: 0.18, boredom: 0.2,
   closeness: 0.4, dailyShare: 1, dailyShareMax: 5, dailyImportant: 0, dailyImportantMax: 3,
@@ -58,6 +77,12 @@ delete env.ELECTRON_RUN_AS_NODE
 const smokeUserData = process.env.LIVE2D_SMOKE_USERDATA
   || fs.mkdtempSync(path.join(os.tmpdir(), 'live2d-smoke-'))
 env.LIVE2D_PROBE_USERDATA = smokeUserData
+const poseScreenshotPath = process.env.LIVE2D_POSE_SCREENSHOT || ''
+let poseProbeParams = null
+try {
+  const parsed = process.env.LIVE2D_POSE_PARAMS_JSON ? JSON.parse(process.env.LIVE2D_POSE_PARAMS_JSON) : null
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) poseProbeParams = parsed
+} catch { poseProbeParams = null }
 const childArgs = ['--no-sandbox', path.join(pluginDir, 'electron', 'main.cjs')]
 const child = spawn(exe.path, childArgs, {
   cwd: pluginDir, stdio: ['ignore', 'pipe', 'pipe'], env,
@@ -71,6 +96,7 @@ let buf = ''
 let phase = 'waiting'
 let passed = 0
 let failed = 0
+let poseVisual = null
 const timer = setTimeout(() => finish('TIMEOUT'), Number(process.env.LIVE2D_SMOKE_TIMEOUT_MS) || 60000)
 
 function check(ok, label, detail = '') {
@@ -114,6 +140,13 @@ child.on('exit', (code, signal) => {
 function send(command) {
   socket?.write(JSON.stringify({ __live2d: 1, ...command }) + '\n')
 }
+function continueToMenu() {
+  phase = 'menu'
+  send({ type: 'debug-menu', instanceId: 'inst-1', which: 'preset', x: 40, y: 40, clickFirstAction: true })
+}
+function continueAfterChest() {
+  continueToMenu()
+}
 
 child.stdout.setEncoding('utf8')
 child.stdout.on('data', (chunk) => {
@@ -145,6 +178,11 @@ function connect(port) {
       try { msg = JSON.parse(line) } catch { continue }
       if (msg.type === 'console') {
         rendererLog.push(`renderer[${msg.level}] ${msg.message}`)
+        continue
+      }
+      if (msg.type === 'state' && msg.phase === 'model-params') {
+        check(msg.paramMeta && Object.keys(msg.paramMeta).length > 0,
+          '模型参数范围已上报给设置页和 AI', JSON.stringify({ count: msg.count, metaCount: Object.keys(msg.paramMeta || {}).length, rArm: msg.paramMeta?.RArm, rForearm: msg.paramMeta?.RForearm }))
         continue
       }
       if (msg.type === 'error') {
@@ -185,19 +223,203 @@ function connect(port) {
         continue
       }
       if (msg.type === 'state' && msg.phase === 'rendering' && phase === 'init') {
-        phase = 'menu'
-        send({ type: 'debug-menu', instanceId: 'inst-1', which: 'preset', x: 40, y: 40, clickFirstAction: true })
+        phase = 'holds'
+        send({ type: 'debug-hold-check', instanceId: 'inst-1' })
+        continue
+      }
+      if (msg.type === 'state' && msg.phase === 'hold-check' && phase === 'holds') {
+        check(msg.preserveIndependentHolds === true
+          && msg.heldActions.includes('face-demo')
+          && msg.heldActions.includes('cap-demo'),
+        '不同参数骨架的保持动作可以同时存在', JSON.stringify(msg))
+        phase = 'self-capture'
+        send({ type: 'screenshot', instanceId: 'inst-1', id: 'self-view-test' })
+        continue
+      }
+      if (msg.type === 'screenshot' && phase === 'self-capture') {
+        check(msg.ok === true && String(msg.base64 || '').startsWith('iVBOR'),
+          'AI 自检只能通过模型窗口 capturePage 取图', JSON.stringify({ ok: msg.ok, id: msg.id, bytes: String(msg.base64 || '').length }))
+        phase = 'action-test'
+        send({ type: 'anim', instanceId: 'inst-1', action: 'ratio-wave', performance: null })
+        continue
+      }
+      if (msg.type === 'anim-done' && phase === 'action-test') {
+        check(msg.action === 'ratio-wave', '肩肘腕三段挥手能正常执行且无生命感参数不报错', JSON.stringify(msg))
+        phase = 'pose-open'
+        send({
+          type: 'pose-editor-open',
+          instanceId: 'inst-1',
+          action: config.presets.actions.find((item) => item.id === 'ratio-wave'),
+        })
+        continue
+      }
+      if (msg.type === 'state' && msg.phase === 'pose-editor-loaded' && phase === 'pose-open') {
+        check(msg.sourceActionId === 'ratio-wave' && msg.steps?.length === 3,
+          '姿势设计器可载入已有动作并还原起始/中间/最终步骤', JSON.stringify({ source: msg.sourceActionId, steps: msg.steps?.length }))
+        check(msg.steps?.every((step) => step.params === 3) && msg.handles > 0,
+          '载入后的每步参数与可拖拽骨架控制点已生成', JSON.stringify({ params: msg.steps?.map((step) => step.params), handles: msg.handles }))
+        const screenLeftArm = (msg.handleBindings ?? []).filter((item) => /屏幕左(?:肩|肘|手)/.test(item.label))
+        const expectedLeft = msg.armSides?.left === 'L' ? 'L' : 'R'
+        check(screenLeftArm.some((item) => item.bindings?.some((binding) => new RegExp(`^(?:shoulder|elbow|wrist|hand)${expectedLeft}$`).test(binding.logical)))
+          && !screenLeftArm.some((item) => item.bindings?.some((binding) => new RegExp(`^(?:shoulder|elbow|wrist|hand)${expectedLeft === 'L' ? 'R' : 'L'}$`).test(binding.logical))),
+        '屏幕左侧骨架控制点按实际网格位置自适应绑定', JSON.stringify({ side: msg.armSides, calibration: msg.armCalibration, handles: screenLeftArm }))
+        check(msg.modelFrozen === true && msg.ignoringMouse === false,
+          '姿势编辑期间模型冻结且窗口不再鼠标穿透', JSON.stringify({ frozen: msg.modelFrozen, ignore: msg.ignoringMouse }))
+        check(Number(msg.editorOffset) > 0,
+          '模型按右侧参数栏之外的可用区域向左重新居中', JSON.stringify({ offset: msg.editorOffset }))
+        poseVisual = {
+          bounds: msg.modelBounds,
+          viewport: msg.viewport,
+          before: '',
+        }
+        phase = 'pose-hit-close'
+        send({ type: 'debug-interactive', instanceId: 'inst-1', id: 'hit-close', x: msg.closeCenter?.x, y: msg.closeCenter?.y })
+        continue
+      }
+      if (msg.type === 'state' && msg.phase === 'interactive-probe' && msg.id === 'hit-close' && phase === 'pose-hit-close') {
+        check(msg.interactive === true && msg.ignoringMouse === false && msg.element?.id === 'pose-editor-close',
+          '设计器关闭按钮可以收到鼠标点击', JSON.stringify({ interactive: msg.interactive, ignore: msg.ignoringMouse, element: msg.element }))
+        phase = 'pose-hit-handle'
+        send({ type: 'debug-pose-editor', instanceId: 'inst-1', id: 'hit-handle-coords', action: 'snapshot' })
+        continue
+      }
+      if (msg.type === 'pose-editor-debug' && msg.id === 'hit-handle-coords' && phase === 'pose-hit-handle') {
+        phase = 'pose-hit-handle-probe'
+        send({
+          type: 'debug-interactive',
+          instanceId: 'inst-1',
+          id: 'hit-handle',
+          x: msg.result?.firstHandleCenter?.x,
+          y: msg.result?.firstHandleCenter?.y,
+        })
+        continue
+      }
+      if (msg.type === 'state' && msg.phase === 'interactive-probe' && msg.id === 'hit-handle' && phase === 'pose-hit-handle-probe') {
+        check(msg.interactive === true && msg.ignoringMouse === false && String(msg.element?.cls || '').includes('pose-handle'),
+          '骨架控制点可以收到鼠标拖动', JSON.stringify({ interactive: msg.interactive, ignore: msg.ignoringMouse, element: msg.element }))
+        const bounds = poseVisual?.bounds
+        const viewport = poseVisual?.viewport
+        const rect = bounds && viewport
+          ? {
+            x: Math.max(0, Math.floor(bounds.x)),
+            y: Math.max(0, Math.floor(bounds.y)),
+            width: Math.max(1, Math.min(Math.ceil(bounds.width), viewport.width - Math.max(0, Math.floor(bounds.x)))),
+            height: Math.max(1, Math.min(Math.ceil(bounds.height), viewport.height - Math.max(0, Math.floor(bounds.y)))),
+          }
+          : undefined
+        poseVisual = { ...(poseVisual ?? {}), rect }
+        phase = 'pose-visual-before'
+        send({ type: 'screenshot', instanceId: 'inst-1', id: 'pose-visual-before', rect })
+        continue
+      }
+      if (msg.type === 'screenshot' && msg.id === 'pose-visual-before' && phase === 'pose-visual-before') {
+        poseVisual.before = String(msg.base64 || '')
+        phase = 'pose-visual-change'
+        if (poseProbeParams) {
+          send({ type: 'debug-pose-editor', instanceId: 'inst-1', id: 'pose-visual-change', action: 'set-params', params: poseProbeParams })
+        } else {
+          send({ type: 'debug-pose-editor', instanceId: 'inst-1', id: 'pose-visual-change', action: 'add-param', param: 'headX', value: 25 })
+        }
+        continue
+      }
+      if (msg.type === 'pose-editor-debug' && msg.id === 'pose-visual-change' && phase === 'pose-visual-change') {
+        phase = 'pose-visual-after'
+        send({ type: 'screenshot', instanceId: 'inst-1', id: 'pose-visual-after', rect: poseVisual?.rect })
+        continue
+      }
+      if (msg.type === 'screenshot' && msg.id === 'pose-visual-after' && phase === 'pose-visual-after') {
+        check(Boolean(poseVisual?.before) && String(msg.base64 || '') !== poseVisual.before,
+          '修改姿势参数后模型画面真实发生变化', JSON.stringify({ beforeBytes: poseVisual?.before?.length ?? 0, afterBytes: String(msg.base64 || '').length }))
+        if (poseScreenshotPath) {
+          phase = 'pose-screenshot'
+          send({ type: 'screenshot', instanceId: 'inst-1', id: 'pose-editor-visual' })
+        } else {
+          phase = 'pose-add-middle'
+          send({ type: 'debug-pose-editor', instanceId: 'inst-1', id: 'pose-add', action: 'add-middle' })
+        }
+        continue
+      }
+      if (msg.type === 'screenshot' && msg.id === 'pose-editor-visual' && phase === 'pose-screenshot') {
+        let saved = false
+        try {
+          fs.mkdirSync(path.dirname(poseScreenshotPath), { recursive: true })
+          fs.writeFileSync(poseScreenshotPath, Buffer.from(String(msg.base64 || ''), 'base64'))
+          saved = fs.statSync(poseScreenshotPath).size > 0
+        } catch { saved = false }
+        check(saved, '姿势设计器截图已保存供人工核对', poseScreenshotPath)
+        phase = 'pose-add-middle'
+        send({ type: 'debug-pose-editor', instanceId: 'inst-1', id: 'pose-add', action: 'add-middle' })
+        continue
+      }
+      if (msg.type === 'pose-editor-debug' && msg.id === 'pose-add' && phase === 'pose-add-middle') {
+        check(msg.result?.steps?.length === 4 && msg.result?.active === 1,
+          '可在当前姿势后插入并复制一个中间姿势', JSON.stringify({ steps: msg.result?.steps?.length, active: msg.result?.active }))
+        phase = 'pose-add-param'
+        send({ type: 'debug-pose-editor', instanceId: 'inst-1', id: 'pose-param', action: 'add-param', param: 'headX', value: 12 })
+        continue
+      }
+      if (msg.type === 'pose-editor-debug' && msg.id === 'pose-param' && phase === 'pose-add-param') {
+        check(msg.result?.steps?.[msg.result?.active]?.params >= 4,
+          '未使用参数可手动加入当前姿势并参与微调', JSON.stringify(msg.result?.steps?.[msg.result?.active]))
+        phase = 'pose-preview'
+        send({ type: 'debug-pose-editor', instanceId: 'inst-1', id: 'pose-preview', action: 'preview', durationMs: 300 })
+        continue
+      }
+      if (msg.type === 'pose-editor-debug' && msg.id === 'pose-preview' && phase === 'pose-preview') {
+        check(msg.result?.steps?.length === 4, '未保存的多姿势草稿可发起整段预览', JSON.stringify(msg.result?.steps?.length))
+        phase = 'pose-preview-playing'
+        continue
+      }
+      if (msg.type === 'anim-done' && msg.action === 'ratio-wave' && phase === 'pose-preview-playing') {
+        check(true, '多姿势草稿通过关键帧平滑播放完成')
+        phase = 'pose-close'
+        send({ type: 'debug-pose-editor', instanceId: 'inst-1', id: 'pose-close', action: 'close' })
+        continue
+      }
+      if (msg.type === 'pose-editor-debug' && msg.id === 'pose-close' && phase === 'pose-close') {
+        check(msg.result?.open === false && msg.result?.editorExpanded === false && msg.result?.modelFrozen === false && msg.result?.editorOffset === 0,
+          '关闭设计器后恢复普通模型界面与动态效果')
+        if (chestMotion) {
+          phase = 'motion-chest'
+          send({ type: 'anim', instanceId: 'inst-1', action: 'motion-chest-test' })
+        } else {
+          continueAfterChest()
+        }
+        continue
+      }
+      if (msg.type === 'anim-done' && msg.action === 'motion-chest-test' && phase === 'motion-chest') {
+        check(true, '未注册 motion3“抚胸”动画可直接播放完成')
+        if (chestScreenshotPath) {
+          phase = 'motion-chest-shot'
+          send({ type: 'screenshot', instanceId: 'inst-1', id: 'motion-chest-shot' })
+        } else {
+          continueAfterChest()
+        }
+        continue
+      }
+      if (msg.type === 'screenshot' && msg.id === 'motion-chest-shot' && phase === 'motion-chest-shot') {
+        let saved = false
+        try {
+          fs.mkdirSync(path.dirname(chestScreenshotPath), { recursive: true })
+          fs.writeFileSync(chestScreenshotPath, Buffer.from(String(msg.base64 || ''), 'base64'))
+          saved = fs.statSync(chestScreenshotPath).size > 0
+        } catch { saved = false }
+        check(saved, '抚胸动作截图已保存供人工核对', chestScreenshotPath)
+        continueAfterChest()
         continue
       }
       if (msg.type === 'state' && msg.phase === 'preset-menu' && phase === 'menu') {
         check(JSON.stringify(msg.groups) === JSON.stringify(['动作', '循环', '状态']), '右键菜单只保留三个大类', JSON.stringify(msg.groups))
         check(msg.statusRows >= 8, '状态二级菜单带生命状态', `rows=${msg.statusRows}`)
+        check(JSON.stringify(msg.statusGroups) === JSON.stringify(['身心状态', '心情明细', '互动关系', '主动感知']),
+          '生命感明细使用三级分类菜单', JSON.stringify(msg.statusGroups))
         check(JSON.stringify(msg.actionEntries) === JSON.stringify(['默认动作', '自定义动作', '模型自带', '停止动作']),
           '动作二级菜单固定为默认/自定义/模型自带/停止四项', JSON.stringify(msg.actionEntries))
         check(msg.nestedSubmenuPosition === 'fixed', '三级动作列表使用独立浮层', String(msg.nestedSubmenuPosition))
         check(msg.menuGeometry?.noOverlap === true, '一、二、三级菜单互不遮挡', JSON.stringify(msg.menuGeometry))
         check(msg.menuGeometry?.insideViewport === true, '三级菜单全部位于窗口内', JSON.stringify(msg.menuGeometry))
         check(Number(msg.menuCloseDelayMs) >= 600, '子菜单关闭留出足够的选择时间', String(msg.menuCloseDelayMs))
+        check(msg.preserveIndependentHolds === true, '不同骨架保持动作默认允许共存', String(msg.preserveIndependentHolds))
         check(!msg.actionGroups.includes('内置动作'), '动作菜单不再展示写死的内置动作', JSON.stringify(msg.actionGroups))
         check(JSON.stringify(msg.loopEntries) === JSON.stringify(['循环', '循环设置', '停止循环']),
           '循环菜单保留现有循环并提供设置与停止', JSON.stringify(msg.loopEntries))

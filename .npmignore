@@ -1,0 +1,10 @@
+internal/
+.tmp/
+.npm-cache/
+tools/.drill/
+tests/.smoke-userdata/
+*.log
+.env
+.env.*
+*.pem
+*.key

@@ -288,6 +288,148 @@
   #preset-menu .menu-status .status-key { opacity: .58; }
   #preset-menu .menu-status .status-value { text-align: right; }
 
+  /* --- 独立姿势设计器（挂在模型窗口上的编辑层） --- */
+  #pose-editor {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    pointer-events: auto;
+    color: #eef4ff;
+    font: 12px/1.5 "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  }
+  #pose-editor.hidden { display: none; }
+  body.pose-editing #toolbar,
+  body.pose-editing #composer,
+  body.pose-editing #reply,
+  body.pose-editing #adjust,
+  body.pose-editing #instance-title,
+  body.pose-editing #mode-menu,
+  body.pose-editing #preset-menu {
+    visibility: hidden;
+    pointer-events: none;
+  }
+  #pose-editor-header {
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    top: 8px;
+    min-height: 42px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    box-sizing: border-box;
+    border: 1px solid rgba(110, 150, 240, .45);
+    border-radius: 10px;
+    background: rgba(18, 24, 42, .92);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+    pointer-events: auto;
+  }
+  #pose-editor-header strong { white-space: nowrap; }
+  #pose-editor-header input {
+    min-width: 0;
+    height: 26px;
+    border: 1px solid rgba(130, 160, 220, .35);
+    border-radius: 6px;
+    background: rgba(8, 12, 24, .7);
+    color: inherit;
+    padding: 0 6px;
+  }
+  #pose-editor-header .grow { flex: 1 1 120px; }
+  #pose-editor-header #pose-editor-duration {
+    flex: 0 0 88px;
+    width: 88px;
+  }
+  #pose-editor button {
+    border: 1px solid rgba(130, 160, 220, .4);
+    border-radius: 6px;
+    background: rgba(45, 62, 100, .8);
+    color: inherit;
+    padding: 4px 8px;
+    cursor: pointer;
+  }
+  #pose-editor button.primary { background: #356fd2; border-color: #5f93ef; }
+  #pose-editor button.active { background: #2e7d5b; border-color: #5ac78f; }
+  #pose-editor-handles {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .pose-handle {
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    margin: -12px 0 0 -12px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, .9);
+    background: rgba(57, 116, 235, .8);
+    box-shadow: 0 0 0 4px rgba(57, 116, 235, .18);
+    pointer-events: auto;
+    cursor: grab;
+    touch-action: none;
+  }
+  .pose-handle.dragging { cursor: grabbing; background: rgba(255, 177, 62, .92); }
+  .pose-handle span {
+    position: absolute;
+    left: 26px;
+    top: -3px;
+    white-space: nowrap;
+    padding: 2px 5px;
+    border-radius: 5px;
+    background: rgba(12, 18, 34, .8);
+    font-size: 10px;
+  }
+  .pose-handle.label-left span {
+    left: auto;
+    right: 26px;
+  }
+  #pose-editor-sidebar {
+    position: absolute;
+    top: 58px;
+    right: 8px;
+    bottom: 8px;
+    width: min(340px, 44vw);
+    overflow-y: auto;
+    box-sizing: border-box;
+    padding: 9px;
+    border: 1px solid rgba(110, 150, 240, .45);
+    border-radius: 10px;
+    background: rgba(18, 24, 42, .94);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+    pointer-events: auto;
+  }
+  #pose-editor-sidebar.collapsed {
+    width: 104px;
+    overflow: hidden;
+  }
+  #pose-editor-sidebar.collapsed section { display: none; }
+  #pose-editor-sidebar-toggle {
+    width: 100%;
+    margin-bottom: 8px;
+  }
+  #pose-editor-sidebar section { margin-bottom: 10px; }
+  #pose-editor-sidebar h4 { margin: 0 0 5px; font-size: 12px; color: #aecdff; }
+  #pose-editor-steps, #pose-editor-toasts { display: flex; flex-wrap: wrap; gap: 5px; }
+  .pose-toggle-group {
+    width: 100%;
+    padding: 5px 6px;
+    box-sizing: border-box;
+    border: 1px solid rgba(130, 160, 220, .14);
+    border-radius: 7px;
+  }
+  .pose-toggle-group .pose-toggle-label {
+    margin-bottom: 4px;
+    color: #8eacdf;
+    font-size: 10.5px;
+  }
+  .pose-toggle-group button { margin: 0 4px 4px 0; }
+  #pose-editor table { width: 100%; border-collapse: collapse; }
+  #pose-editor th, #pose-editor td { padding: 3px; border-bottom: 1px solid rgba(130, 160, 220, .16); text-align: left; vertical-align: top; }
+  #pose-editor input[type="number"] { width: 62px; padding: 2px 4px; }
+  #pose-editor details { margin-top: 6px; }
+  #pose-editor summary { cursor: pointer; color: #aecdff; }
+  #pose-editor-note { margin: 4px 0; opacity: .72; font-size: 10.5px; }
+
   /* --- 阶段 2：窗口内对话 --- */
   /* 底边固定在「模型顶部 + 6px」：短回答贴底，长回答向上长，永远不压模型。
      --reply-bottom 由 renderer 按 model.y 实时写入。 */
@@ -610,6 +752,43 @@
 
   <div id="preset-menu" class="hidden"></div>
 
+  <div id="pose-editor" class="hidden">
+    <div id="pose-editor-header">
+      <strong>姿势设计器</strong>
+      <input id="pose-editor-id" class="grow" placeholder="动作 ID，例如 custom-dance">
+      <input id="pose-editor-label" placeholder="动作名">
+      <input id="pose-editor-duration" type="number" min="200" max="10000" step="100" title="整段动作时长（毫秒）" placeholder="时长 ms">
+      <span id="pose-editor-summary"></span>
+      <button id="pose-editor-preview" type="button">预览整段</button>
+      <button id="pose-editor-save" class="primary" type="button">保存动作</button>
+      <button id="pose-editor-close" type="button">关闭</button>
+    </div>
+    <div id="pose-editor-handles"></div>
+    <aside id="pose-editor-sidebar">
+      <button id="pose-editor-sidebar-toggle" type="button" title="收起后可查看完整模型，再点一次恢复参数表">收起参数面板</button>
+      <section>
+        <h4>姿势步骤（起始 → 中间 → 最终）</h4>
+        <div id="pose-editor-steps"></div>
+        <p id="pose-editor-note">拖动骨架圆点设计当前姿势；每个姿势之间会平滑过渡。</p>
+        <button id="pose-editor-add-step" type="button">增加中间姿势</button>
+        <button id="pose-editor-remove-step" type="button">删除当前中间姿势</button>
+      </section>
+      <section>
+        <h4>表情 / 换装 / 手势切换</h4>
+        <div id="pose-editor-toasts"></div>
+      </section>
+      <section>
+        <h4>当前姿势参数微调</h4>
+        <div id="pose-editor-used"></div>
+        <details>
+          <summary>未使用的参数（展开后手动添加）</summary>
+          <div id="pose-editor-unused"></div>
+        </details>
+      </section>
+    </aside>
+  </div>
+
   <script src="./renderer.js"></script>
+  <script src="./pose-editor.js"></script>
 </body>
 </html>

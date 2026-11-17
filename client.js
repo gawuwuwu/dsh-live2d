@@ -244,6 +244,7 @@ window.__ModuleLoader__.load({
         mode: config.mode === 'manual' || config.mode === 'semi' ? config.mode : 'auto',
         autoBubble: config.autoBubble !== false,
         autoInteract: config.autoInteract !== false,
+        preserveIndependentHolds: config.preserveIndependentHolds !== false,
         idlePresets: config.idlePresets !== false,
         audienceAwareEnabled: config.audienceAwareEnabled !== false,
         memoryEnabled: config.memoryEnabled === true,
@@ -266,6 +267,7 @@ window.__ModuleLoader__.load({
         wakeCaptureEnabled: config.wakeCaptureEnabled === true,
         wakeMaxPerHour: config.wakeMaxPerHour ?? 60,
         lifeEnabled: config.lifeEnabled !== false,
+        moodTraceEnabled: config.moodTraceEnabled !== false,
         lifeNonverbalEnabled: config.lifeNonverbalEnabled !== false,
         lifeNonverbalCooldownSec: (config.lifeNonverbalCooldownMs ?? 12000) / 1000,
         eventWakeEnabled: config.eventWakeEnabled === true,
@@ -281,6 +283,8 @@ window.__ModuleLoader__.load({
         eventQuietEnd: config.eventQuietEnd ?? '08:00',
         lifeFarewellEnabled: config.lifeFarewellEnabled !== false,
         aiMoveEnabled: config.aiMoveEnabled === true,
+        manualToolsEnabled: config.manualToolsEnabled === true,
+        selfInspectEnabled: config.selfInspectEnabled !== false,
         ttsEnabled: config.ttsEnabled === true,
         ttsAutoSpeak: config.ttsAutoSpeak === true,
         ttsUrl: config.ttsUrl ?? 'http://127.0.0.1:7890/tts',
@@ -325,6 +329,7 @@ window.__ModuleLoader__.load({
         mode: draft.mode,
         autoBubble: Boolean(draft.autoBubble),
         autoInteract: Boolean(draft.autoInteract),
+        preserveIndependentHolds: Boolean(draft.preserveIndependentHolds),
         idlePresets: Boolean(draft.idlePresets),
         audienceAwareEnabled: Boolean(draft.audienceAwareEnabled),
         memoryEnabled: Boolean(draft.memoryEnabled),
@@ -350,6 +355,7 @@ window.__ModuleLoader__.load({
         wakeCaptureEnabled: Boolean(draft.wakeCaptureEnabled),
         wakeMaxPerHour: Math.min(360, Math.max(1, Math.round(Number(draft.wakeMaxPerHour) || 60))),
         lifeEnabled: Boolean(draft.lifeEnabled),
+        moodTraceEnabled: Boolean(draft.moodTraceEnabled),
         lifeNonverbalEnabled: Boolean(draft.lifeNonverbalEnabled),
         lifeNonverbalCooldownMs: Math.round(Math.min(300, Math.max(3, Number(draft.lifeNonverbalCooldownSec) || 12)) * 1000),
         eventWakeEnabled: draft.wakeDriver === 'event',
@@ -365,6 +371,8 @@ window.__ModuleLoader__.load({
         eventQuietEnd: draft.eventQuietEnd,
         lifeFarewellEnabled: Boolean(draft.lifeFarewellEnabled),
         aiMoveEnabled: Boolean(draft.aiMoveEnabled),
+        manualToolsEnabled: Boolean(draft.manualToolsEnabled),
+        selfInspectEnabled: Boolean(draft.selfInspectEnabled),
         ttsEnabled: Boolean(draft.ttsEnabled),
         ttsAutoSpeak: Boolean(draft.ttsAutoSpeak),
         ttsUrl: draft.ttsUrl,
@@ -416,6 +424,69 @@ window.__ModuleLoader__.load({
         `3. 用 live2d_preset define 保存调整后的动作，id 必须继续使用 "${action?.id || ''}"。如果这是默认动作，就创建一个同 ID 的自定义覆盖层，让菜单用调整后的版本替换默认版本。`,
         '4. 保存后简要说明改了哪些参数，不要只回复计划。',
       ].filter((line) => line !== '').join('\n')
+    }
+
+    function describeModelParam(name, meta = null) {
+      const raw = String(name ?? '')
+      const lower = raw.toLowerCase()
+      let label = raw
+      let unit = '模型单位'
+      let step = 1
+      if (/bodyanglex/.test(lower)) { label = '身体左右倾斜'; unit = '度（+1 = +1°）' }
+      else if (/bodyangley/.test(lower)) { label = '身体前后倾'; unit = '度（+1 = +1°）' }
+      else if (/bodyanglez/.test(lower)) { label = '身体扭转'; unit = '度（+1 = +1°）' }
+      else if (/anglex|headx/.test(lower)) { label = '头部左右转动'; unit = '度（+1 = +1°）' }
+      else if (/angley|heady/.test(lower)) { label = '头部上下俯仰'; unit = '度（+1 = +1°）' }
+      else if (/anglez|headz/.test(lower)) { label = '头部左右倾斜'; unit = '度（+1 = +1°）' }
+      else if (/eyeballx/i.test(raw)) { label = '眼球左右'; unit = '比例（-1~1）'; step = 0.05 }
+      else if (/eyebally/i.test(raw)) { label = '眼球上下'; unit = '比例（-1~1）'; step = 0.05 }
+      else if (/eye[lr]open/i.test(raw)) { label = /l/i.test(raw) ? '左眼开合' : '右眼开合'; unit = '比例（1=完全张开）'; step = 0.05 }
+      else if (/mouthopen/i.test(raw)) { label = '嘴巴开合'; unit = '比例（0~1）'; step = 0.05 }
+      else if (/mouthform/i.test(raw)) { label = '嘴角表情'; unit = '比例（约 -1~1）'; step = 0.05 }
+      else if (/brow[ly]y/i.test(raw)) { label = '眉毛上下'; unit = '比例'; step = 0.05 }
+      else if (/brow.*form/i.test(raw)) { label = '眉毛形状'; unit = '比例'; step = 0.05 }
+      else if (/brow.*angle/i.test(raw)) { label = '眉毛旋转角度'; unit = '模型单位/度' }
+      else if (/mouthx/i.test(raw)) { label = '嘴巴左右移动'; unit = '比例'; step = 0.05 }
+      else if (/eyesmile/i.test(raw)) { label = '笑眼表情'; unit = '比例'; step = 0.05 }
+      else if (/eyeanger/i.test(raw)) { label = '生气眼表情'; unit = '比例'; step = 0.05 }
+      else if (/eyepuff/i.test(raw)) { label = '鼓脸眼表情'; unit = '比例'; step = 0.05 }
+      else if (/^param_exp/i.test(raw)) { label = `表情贴图/表情开关 ${raw.replace(/^param_exp/i, 'EXP')}`; unit = '模型开关值' }
+      else if (/^paramcol_/i.test(raw)) { label = '部件颜色或显示开关'; unit = '模型开关值' }
+      else if (/^key\d+/i.test(raw)) { label = '模型作者的部件切换键'; unit = '模型开关值' }
+      else if (/paramhf_/i.test(raw)) { label = '前发/发丝摆动骨骼'; unit = '模型单位/度' }
+      else if (/paramtwl/i.test(raw)) { label = '尾部/发束/飘带摆动骨骼'; unit = '模型单位/度' }
+      else if (/paramyfwl/i.test(raw)) { label = '衣发/飘带次级摆动骨骼'; unit = '模型单位/度' }
+      else if (/paramgsfwl/i.test(raw)) { label = '衣物/头发摇摆骨骼'; unit = '模型单位/度' }
+      else if (/artmesh/i.test(raw)) { label = '模型特定 ArtMesh 旋转控制'; unit = '模型单位/度' }
+      else if (/shoulder/i.test(raw)) { label = '肩关节'; unit = '模型单位/度' }
+      else if (/forearm|elbow/i.test(raw)) { label = '手肘/前臂弯曲'; unit = '模型单位/度' }
+      else if (/wrist/i.test(raw)) { label = '手腕关节'; unit = '模型单位/度' }
+      else if (/hip/i.test(raw)) { label = '髋部转动'; unit = '模型单位/度' }
+      else if (/^rarm$/i.test(raw)) { label = '右肩/上臂'; unit = '模型单位/度' }
+      else if (/^larm$/i.test(raw)) { label = '左肩/上臂'; unit = '模型单位/度' }
+      else if (/arm_?l|armla/i.test(raw)) { label = '左臂关节'; unit = '模型单位/度' }
+      else if (/arm_?r|armra/i.test(raw)) { label = '右臂关节'; unit = '模型单位/度' }
+      else if (/hand_?l|handla/i.test(raw)) { label = '左手关节'; unit = '模型单位/度' }
+      else if (/hand_?r|handra/i.test(raw)) { label = '右手关节'; unit = '模型单位/度' }
+      else if (/leg_?l|legla/i.test(raw)) { label = '左腿关节'; unit = '模型单位/度' }
+      else if (/leg_?r|legra/i.test(raw)) { label = '右腿关节'; unit = '模型单位/度' }
+      else if (/clothes/i.test(raw)) { label = '换装/身体部件开关'; unit = '模型开关值'; step = 1 }
+      else if (/breath/i.test(raw)) { label = '呼吸幅度'; unit = '模型单位'; step = 0.05 }
+      else if (/^param$/i.test(raw) || /^param\d+/i.test(raw) || /^angle[xyz]?/i.test(raw)) { label = '模型作者自定义动作参数'; unit = '模型单位' }
+      else { label = `模型作者自定义参数（可能控制骨骼、表情或部件开关）`; unit = '模型单位/开关值' }
+      return {
+        label,
+        unit,
+        step,
+        min: Number.isFinite(Number(meta?.min)) ? Number(meta.min) : null,
+        max: Number.isFinite(Number(meta?.max)) ? Number(meta.max) : null,
+        default: Number.isFinite(Number(meta?.default)) ? Number(meta.default) : 0,
+      }
+    }
+
+    function draftTrackFromParam(name, meta) {
+      const base = describeModelParam(name, meta).default
+      return { param: name, keys: [[0, base], [0.5, base], [1, base]] }
     }
 
     const sessionLabel = (item) => `${item.title || '(无标题会话)'} · ${String(item.id).slice(0, 10)}`
@@ -707,10 +778,14 @@ window.__ModuleLoader__.load({
       const [profileDetail, setProfileDetail] = React.useState(null)
       const [profileTick, setProfileTick] = React.useState(0)
       const [historyOpen, setHistoryOpen] = React.useState(false)
-      const [newAction, setNewAction] = React.useState({ label: '', description: '', draft: null })
-      const [actionAdjust, setActionAdjust] = React.useState({
-        actionKey: '', amplitude: '', frequency: '', duration: '', note: '',
+      const [newAction, setNewAction] = React.useState({
+        mode: 'ai', id: '', label: '', description: '', durationMs: 2000, draft: null,
       })
+      const [actionAdjust, setActionAdjust] = React.useState({
+        mode: 'ai', actionKey: '', amplitude: '', frequency: '', duration: '', note: '',
+      })
+      const [selfAdjustDraft, setSelfAdjustDraft] = React.useState(null)
+      const [selfParamChoice, setSelfParamChoice] = React.useState('')
       const [newLoop, setNewLoop] = React.useState({ editingId: '', label: '', steps: [], intervalSec: 8, targets: [] })
 
       React.useEffect(() => {
@@ -1073,7 +1148,7 @@ window.__ModuleLoader__.load({
 
           h(
             Field,
-            { label: '模型', hint: '下拉扫自配置的模型扫描根（默认 D:\\Live2D，最多 3 层）；已被别的实例用掉的模型会置灰。也可以直接填目录。' },
+            { label: '模型', hint: '下拉扫自配置的模型扫描根（默认用户目录下的 Live2D，最多 3 层）；已被别的实例用掉的模型会置灰。也可以直接填目录。' },
             h(
               'select',
               {
@@ -1301,7 +1376,7 @@ window.__ModuleLoader__.load({
             Field,
             { label: '参考音 / 参考文本', hint: '参考音是 CosyVoice2 的 prompt（wav 路径）；参考文本是那段音频的内容。' },
             h('input', {
-              style: { ...S.num, width: 300 }, type: 'text', placeholder: 'D:\\…\\liuying.wav',
+              style: { ...S.num, width: 300 }, type: 'text', placeholder: 'C:\\path\\to\\reference.wav',
               value: draft.ttsPrompt,
               onChange: (event) => patchDraft(inst.id, 'ttsPrompt', event.target.value),
             }),
@@ -1337,29 +1412,8 @@ window.__ModuleLoader__.load({
         setBusy('')
       }
 
-      const designDraft = async () => {
-        const target = instances.find((item) => profileInstanceIds.includes(item.id)) || instances[0]
-        if (!target) return
-        if (!newAction.label && !newAction.description) {
-          setNotice({ kind: 'warn', text: '先写动作名或一句说明' })
-          return
-        }
-        setBusy('design')
-        const result = await call('/preset', {
-          method: 'POST',
-          body: JSON.stringify({ op: 'design', instanceId: target.id, label: newAction.label, description: newAction.description }),
-        })
-        if (result?.ok && result.draft) {
-          setNewAction((current) => ({ ...current, draft: result.draft, label: current.label || result.draft.label }))
-          setNotice({ kind: result.draft.matched ? 'ok' : 'warn', text: result.hint || '已生成草稿' })
-        } else {
-          setNotice({ kind: 'warn', text: result?.error || '生成失败' })
-        }
-        setBusy('')
-      }
-
-      const previewDraft = async () => {
-        if (!newAction.draft) return
+      const previewAnyDraft = async (draft) => {
+        if (!draft) return
         // 只在该档案绑定的窗口里预览（没有绑定实例时退回第一个实例）
         const ids = profileInstanceIds.length ? profileInstanceIds : instances.slice(0, 1).map((item) => item.id)
         if (!ids.length) {
@@ -1371,7 +1425,7 @@ window.__ModuleLoader__.load({
         for (const id of ids) {
           const result = await call('/preset', {
             method: 'POST',
-            body: JSON.stringify({ op: 'preview', instanceId: id, draft: newAction.draft }),
+            body: JSON.stringify({ op: 'preview', instanceId: id, draft }),
           })
           if (result?.ok) okCount += 1
         }
@@ -1381,16 +1435,166 @@ window.__ModuleLoader__.load({
         setBusy('')
       }
 
-      const saveDraft = async () => {
-        if (!newAction.draft) return
+      const saveAnyDraft = async (draft) => {
+        if (!draft) return
         if (!profile) {
           setNotice({ kind: 'warn', text: '先选一个模型档案' })
           return
         }
+        if (!/^[a-z][a-z0-9_-]{1,23}$/.test(String(draft.id || ''))) {
+          setNotice({ kind: 'warn', text: '动作 ID 需要以小写字母开头，长度 2~24，只使用 a-z、0-9、_、-' })
+          return
+        }
+        if (!Array.isArray(draft.tracks) || !draft.tracks.length) {
+          setNotice({ kind: 'warn', text: '动作至少需要一条参数轨道' })
+          return
+        }
         const existing = Array.isArray(profile.customActions) ? profile.customActions : []
-        const next = [...existing.filter((item) => item.id !== newAction.draft.id), newAction.draft]
+        const next = [...existing.filter((item) => item.id !== draft.id), draft]
         const saved = await savePresetsToProfile(next, Array.isArray(profile.presetSequences) ? profile.presetSequences : [])
-        if (saved?.ok) setNewAction({ label: '', description: '', draft: null })
+        if (saved?.ok) setNewAction((current) => ({ ...current, draft: null }))
+        return saved
+      }
+
+      const sendAiActionDesign = async () => {
+        if (!newAction.label.trim() && !newAction.description.trim()) {
+          setNotice({ kind: 'warn', text: '先写动作名或动作说明' })
+          return
+        }
+        const boundIds = Array.isArray(profileDetail?.boundInstanceIds) ? profileDetail.boundInstanceIds : []
+        const target = instances.find((item) => boundIds.includes(item.id)) || null
+        const sessionId = target?.config?.sessionId || target?.sessionId || ''
+        if (!target || !sessionId) {
+          setNotice({ kind: 'warn', text: '这张动作档案的模型还没有绑定会话，无法把设计交给 AI' })
+          return
+        }
+        if (!window.confirm('AI 设计会调用当前对话并消耗 Token。确定发送吗？')) return
+        setBusy('design-ai')
+        const text = [
+          '[Live2D 自定义动作设计]',
+          `模型档案：${profile?.label || profile?.id || '未命名'}（${profile?.pathKey || '未知路径'}）`,
+          `动作名：${newAction.label || '由你命名'}`,
+          `动作说明：${newAction.description || '无'}`,
+          '请先调用 live2d_params 查看当前模型的真实参数、范围和默认值，再调用 live2d_preset list。',
+          '设计一个可明显看出的自定义动作并直接 define 保存；不要只做轻微眨眼或几度歪头。',
+          '挥手、踢腿、跳舞等身体动作优先使用 bodyX/bodyY/bodyZ、armL/armR、legL/legR 等实际存在参数，身体/四肢幅度通常可取参数范围的 70%~100%。',
+          '保存后简要说明动作 ID、时长、主要参数和预期效果。',
+        ].join('\n')
+        const result = await call('/inject', {
+          method: 'POST',
+          body: JSON.stringify({ sessionId, text, dryRun: false, mode: 'followup' }),
+        })
+        const dispatched = result?.ok === true && result?.dispatched === true && result?.settled?.ok !== false
+        setNotice(dispatched
+          ? { kind: 'ok', text: 'AI 设计请求已发送；保存动作后刷新本页即可看到。' }
+          : { kind: 'warn', text: result?.error || result?.settled?.error || '发送失败：先打开对应对话再试' })
+        setBusy('')
+      }
+
+      const selfTrackValues = (track) => {
+        const keys = Array.isArray(track?.keys) ? [...track.keys].sort((a, b) => Number(a[0]) - Number(b[0])) : []
+        const start = Number(keys[0]?.[1] ?? 0)
+        const end = Number(keys.at(-1)?.[1] ?? start)
+        let peak = start
+        let peakT = 0.5
+        for (const [t, value] of keys) {
+          if (Math.abs(Number(value) - start) > Math.abs(peak - start)) {
+            peak = Number(value)
+            peakT = Number(t)
+          }
+        }
+        return { start, peak, end, peakT: Math.round((peakT || 0.5) * 100) }
+      }
+
+      const selfDraftFromAction = (action) => ({
+        id: action?.id || '',
+        label: action?.label || action?.id || '自定义动作',
+        durationMs: Number(action?.durationMs) || 2000,
+        tracks: (action?.tracks ?? []).map((track) => {
+          const v = selfTrackValues(track)
+          return { param: track.param, keys: [[0, v.start], [v.peakT / 100, v.peak], [1, v.end]] }
+        }),
+      })
+
+      const updateSelfTrack = (setDraft, index, key, value) => {
+        setDraft((current) => {
+          if (!current) return current
+          const tracks = current.tracks.map((track, i) => {
+            if (i !== index) return track
+            const v = selfTrackValues(track)
+            const next = { ...v, [key]: Number(value) }
+            return {
+              ...track,
+              keys: [[0, Number(next.start) || 0], [Math.max(0, Math.min(1, Number(next.peakT) / 100)), Number(next.peak) || 0], [1, Number(next.end) || 0]],
+            }
+          })
+          return { ...current, tracks }
+        })
+      }
+
+      const addSelfTrack = (setDraft, targetInst) => {
+        if (!selfParamChoice) return
+        const meta = targetInst?.renderer?.params?.paramMeta?.[selfParamChoice] ?? null
+        setDraft((current) => current ? {
+          ...current,
+          tracks: [...current.tracks.filter((track) => track.param !== selfParamChoice), draftTrackFromParam(selfParamChoice, meta)],
+        } : current)
+      }
+
+      const removeSelfTrack = (setDraft, index) => {
+        setDraft((current) => current ? { ...current, tracks: current.tracks.filter((_track, i) => i !== index) } : current)
+      }
+
+      const renderSelfTable = (draft, setDraft, targetInst) => {
+        if (!draft) return h('p', { style: S.dim }, '先创建或载入一个动作草稿。')
+        const params = Array.isArray(targetInst?.renderer?.params?.params) ? targetInst.renderer.params.params : []
+        const meta = targetInst?.renderer?.params?.paramMeta ?? {}
+        return h(
+          'div',
+          null,
+          h('p', { style: S.hint }, '自己设计不会调用 AI，也不消耗 Token。表格采用起始 / 峰值 / 结束三个关键帧；峰值时间与数值都可修改。参数用途按常见 Cubism 命名自动翻译，作者自定义参数会明确标注，具体效果以预览为准。'),
+          h('div', { style: { ...S.row, marginTop: 6 } },
+            h('select', {
+              style: { ...S.select, flex: '1 1 260px' },
+              value: selfParamChoice,
+              onChange: (event) => setSelfParamChoice(event.target.value),
+            },
+            h('option', { value: '' }, params.length ? '（添加要控制的骨架参数）' : '（窗口还没上报参数，先打开模型窗口）'),
+            ...params.map((name) => {
+              const info = describeModelParam(name, meta[name])
+              return h('option', { key: name, value: name }, `${info.label}｜${name}`)
+            })),
+            h('button', { type: 'button', style: S.btn, disabled: !selfParamChoice, onClick: () => addSelfTrack(setDraft, targetInst) }, '添加参数')),
+          h('div', { style: { overflowX: 'auto', marginTop: 8 } },
+            h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 11.5 } },
+              h('thead', null, h('tr', null,
+                ...['控制的骨架 / 参数', '单位', '范围 / 默认', '起始值', '峰值', '峰值时间%', '结束值', ''].map((label) => h('th', { key: label, style: { textAlign: 'left', padding: '5px', borderBottom: '1px solid rgba(128,128,128,.3)', whiteSpace: 'nowrap' } }, label)))),
+              h('tbody', null,
+                ...draft.tracks.map((track, index) => {
+                  const info = describeModelParam(track.param, meta[track.param])
+                  const values = selfTrackValues(track)
+                  const input = (key, step = info.step) => h('input', {
+                    type: 'number', step: String(step), value: values[key],
+                    style: { ...S.num, width: 68, padding: '3px 5px' },
+                    onChange: (event) => updateSelfTrack(setDraft, index, key, event.target.value),
+                  })
+                  return h('tr', { key: track.param },
+                    h('td', { style: { padding: '5px' } }, h('div', null, info.label), h('div', { style: { ...S.dim, fontFamily: 'monospace' } }, track.param)),
+                    h('td', { style: { padding: '5px', whiteSpace: 'nowrap' } }, info.unit),
+                    h('td', { style: { padding: '5px', whiteSpace: 'nowrap' } }, `${info.min ?? '?'} ~ ${info.max ?? '?'} / 默认 ${info.default}`),
+                    h('td', { style: { padding: '5px' } }, input('start')),
+                    h('td', { style: { padding: '5px' } }, input('peak')),
+                    h('td', { style: { padding: '5px' } }, input('peakT', 1)),
+                    h('td', { style: { padding: '5px' } }, input('end')),
+                    h('td', { style: { padding: '5px' } }, h('button', { type: 'button', style: S.miniBtn, onClick: () => removeSelfTrack(setDraft, index) }, '删')),
+                  )
+                }))),
+          ),
+          h('div', { style: { ...S.row, marginTop: 8 } },
+            h('button', { type: 'button', style: S.btn, disabled: !draft.tracks.length || busy === 'preview', onClick: () => previewAnyDraft(draft) }, '预览未保存动作'),
+            h('button', { type: 'button', style: S.primary, disabled: !draft.tracks.length || busy.startsWith('patch:'), onClick: () => saveAnyDraft(draft) }, '保存到自定义动作'),
+          ),
+        )
       }
 
       const sendActionAdjustment = async (action, kind) => {
@@ -1483,6 +1687,35 @@ window.__ModuleLoader__.load({
               : { kind: 'ok', text: `正在预览「${seq.label || seq.id}」（${targets.map((item) => instanceTitleOf(item.id)).join(' + ')}，走一遍就停）` })
           })
           .finally(() => setBusy(''))
+      }
+
+      const openPoseEditor = async (action = null) => {
+        const boundIds = Array.isArray(profileDetail?.boundInstanceIds) ? profileDetail.boundInstanceIds : []
+        const target = instances.find((item) => boundIds.includes(item.id)) || null
+        if (!target) {
+          setNotice({ kind: 'warn', text: '当前模型档案没有打开的实例，先绑定并打开模型' })
+          return
+        }
+        setBusy('pose-editor')
+        try {
+          const ready = target.window?.ready === true || ['starting', 'rendering', 'running'].includes(target.window?.state)
+          if (!ready) {
+            await call('/window', {
+              method: 'POST',
+              body: JSON.stringify({ action: 'open', instanceId: target.id }),
+            })
+            await new Promise((resolve) => setTimeout(resolve, 900))
+          }
+          const result = await call('/preset', {
+            method: 'POST',
+            body: JSON.stringify({ op: 'editor-open', instanceId: target.id, actionId: action?.id || undefined }),
+          })
+          setNotice(result?.ok
+            ? { kind: 'ok', text: '姿势设计器已在模型窗口打开' }
+            : { kind: 'warn', text: result?.error || '姿势设计器打开失败' })
+        } finally {
+          setBusy('')
+        }
       }
 
       const saveLoop = async () => {
@@ -1630,7 +1863,7 @@ window.__ModuleLoader__.load({
           h('p', { style: { ...S.sub, marginTop: 12 } }, '表情 / 换装（模型自带）'),
           capabilities
             ? h('p', { style: S.hint }, `从模型包扫到 ${capabilities.expressions.length} 个表情/换装，${capabilityActions.length} 个能直接用（点一次开，再点一次关）。` +
-              (capabilities.motions.length ? ` 另有 ${capabilities.motions.length} 个动画文件（model3.json 没登记，暂不播）：${capabilities.motions.slice(0, 4).map((item) => item.label).join('、')}${capabilities.motions.length > 4 ? '…' : ''}` : ''))
+              (capabilities.motions.length ? ` 另有 ${capabilities.motions.length} 个未登记动画文件，已直接解析并放入模型自带动作：${capabilities.motions.slice(0, 4).map((item) => item.label).join('、')}${capabilities.motions.length > 4 ? '…' : ''}` : ''))
             : h('p', { style: S.hint }, '还没扫描模型包：点一次上面「重新生成」，会同时扫 Exp3/Animation 目录。'),
           ...['clothes', 'face', 'gesture', 'other'].map((key) => {
             const list = capGroups[key] ?? []
@@ -1648,22 +1881,37 @@ window.__ModuleLoader__.load({
           h('p', { style: { ...S.sub, marginTop: 12 } }, '自定义动作'),
           h('p', { style: S.hint }, '这里放你和 AI 为当前模型设计的动作。默认动作也可以调整：AI 会保存一个同 ID 的自定义覆盖版本，模型参数重新生成时不会弄丢。'),
           h('p', { style: S.warn }, '注意：让 AI 新增或调整自定义动作会调用模型，消耗 Token。'),
+          h('div', { style: { ...S.row, marginTop: 6 } },
+            h('button', {
+              type: 'button', style: S.primary, disabled: busy === 'pose-editor',
+              onClick: openPoseEditor,
+            }, busy === 'pose-editor' ? '打开中…' : '打开独立姿势设计器'),
+            h('span', { style: S.hint }, '在模型窗口里拖骨架设计起始、中间和最终姿势；不消耗 Token。')),
           customActions.length
-            ? h('div', { style: { ...S.row, flexWrap: 'wrap', marginTop: 6 } },
-              ...customActions.map((item) => h('button', {
-                key: item.id, type: 'button', style: S.btn,
-                title: `ID：${item.id} · ${item.durationMs || 0}ms`,
+            ? h('div', { style: { display: 'grid', gap: 6, marginTop: 6 } },
+              ...customActions.map((item) => h('div', {
+                key: item.id,
+                style: { ...S.row, flexWrap: 'wrap', padding: '5px 0', borderBottom: '1px solid rgba(130,160,220,.12)' },
+              },
+              h('span', { style: { ...S.hint, flex: '1 1 150px' } }, `${item.label || item.id} · ${item.id} · ${item.durationMs || 0}ms`),
+              h('button', {
+                type: 'button', style: S.btn,
                 disabled: busy.startsWith('anim:'),
                 onClick: () => anim(target.id, item.id),
-              }, item.label || item.id)))
+              }, '播放'),
+              h('button', {
+                type: 'button', style: S.btn,
+                disabled: busy === 'pose-editor',
+                title: '在模型窗口里拖骨架修改每一步，并可逐参数微调',
+                onClick: () => openPoseEditor(item),
+              }, '编辑姿势'))))
             : h('p', { style: S.dim }, '还没有自定义动作。'),
 
           h(
             'div',
             { style: { ...S.card, marginTop: 12 } },
             h('p', { style: S.sub }, '动作调整框'),
-            h('p', { style: S.hint }, '选择默认动作或自定义动作，再用固定选项或自由描述告诉 AI 怎么改。默认动作会生成同 ID 覆盖层，不改动自动生成的原定义。'),
-            h('p', { style: S.warn }, '每次发送都会调用 AI，消耗 Token。'),
+            h('p', { style: S.hint }, '先选择要调整的动作，再选择“AI 调整”或“自己调整”。AI 调整会消耗 Token；自己调整使用本地参数表，不消耗 Token。'),
             h(Field, { label: '选择要调整的动作' },
               h('select', {
                 style: S.select,
@@ -1673,79 +1921,136 @@ window.__ModuleLoader__.load({
               },
               h('option', { value: '' }, adjustableActions.length ? '（选择动作）' : '（暂无可调整动作）'),
               ...adjustableActions.map((item) => h('option', { key: item.key, value: item.key }, item.label)))),
-            h(Field, { label: '动作幅度' },
-              h('select', {
-                style: S.select,
-                value: actionAdjust.amplitude,
-                onChange: (event) => setActionAdjust((current) => ({ ...current, amplitude: event.target.value })),
-              },
-              h('option', { value: '' }, '不调整'),
-              ...ACTION_ADJUST_OPTIONS.amplitude.map((value) => h('option', { key: value, value }, value)))),
-            h(Field, { label: '动作频率' },
-              h('select', {
-                style: S.select,
-                value: actionAdjust.frequency,
-                onChange: (event) => setActionAdjust((current) => ({ ...current, frequency: event.target.value })),
-              },
-              h('option', { value: '' }, '不调整'),
-              ...ACTION_ADJUST_OPTIONS.frequency.map((value) => h('option', { key: value, value }, value)))),
-            h(Field, { label: '动作时间' },
-              h('select', {
-                style: S.select,
-                value: actionAdjust.duration,
-                onChange: (event) => setActionAdjust((current) => ({ ...current, duration: event.target.value })),
-              },
-              h('option', { value: '' }, '不调整'),
-              ...ACTION_ADJUST_OPTIONS.duration.map((value) => h('option', { key: value, value }, value)))),
-            h(Field, { label: '其它调整', hint: '可以描述生活化、幅度曲线、停顿、左右方向或具体效果；AI 会先查当前模型参数再保存。' },
-              h('textarea', {
-                style: { ...S.input, minHeight: 58 },
-                rows: 3,
-                value: actionAdjust.note,
-                placeholder: '例如：开头停半拍，再慢慢低头；只动头和眼睛，不要让身体位移',
-                onChange: (event) => setActionAdjust((current) => ({ ...current, note: event.target.value })),
-              })),
-            h('div', { style: S.row },
+            h('div', { style: { ...S.row, marginTop: 8 } },
               h('button', {
-                type: 'button',
-                style: S.primary,
-                disabled: !selectedAdjust || busy === 'action-adjust',
-                onClick: () => selectedAdjust && sendActionAdjustment(selectedAdjust.action, selectedAdjust.kind),
-              }, busy === 'action-adjust' ? '发送中…' : '发给 AI 调整'),
+                type: 'button', style: actionAdjust.mode === 'ai' ? S.primary : S.btn,
+                onClick: () => setActionAdjust((current) => ({ ...current, mode: 'ai' })),
+              }, 'AI 调整（消耗 Token）'),
+              h('button', {
+                type: 'button', style: actionAdjust.mode === 'self' ? S.primary : S.btn,
+                onClick: () => setActionAdjust((current) => ({ ...current, mode: 'self' })),
+              }, '自己调整（不消耗 Token）'),
               selectedAdjust
-                ? h('span', { style: S.dim }, `将调整「${selectedAdjust.action.label || selectedAdjust.action.id}」；${selectedAdjust.kind === 'default' ? '会保存为同 ID 自定义覆盖层' : '会覆盖同名自定义动作'}`)
+                ? h('button', {
+                  type: 'button', style: S.btn, disabled: busy === 'pose-editor',
+                  title: '打开模型窗口中的独立姿势设计器，载入这个动作的关键帧',
+                  onClick: () => openPoseEditor(selectedAdjust.action),
+                }, busy === 'pose-editor' ? '打开中…' : '拖骨架调整')
                 : null),
+            actionAdjust.mode === 'ai'
+              ? h('div', null,
+                h('p', { style: S.warn }, '发送后会调用 AI，消耗 Token。'),
+                h(Field, { label: '动作幅度' },
+                  h('select', { style: S.select, value: actionAdjust.amplitude, onChange: (event) => setActionAdjust((current) => ({ ...current, amplitude: event.target.value })) },
+                    h('option', { value: '' }, '不调整'),
+                    ...ACTION_ADJUST_OPTIONS.amplitude.map((value) => h('option', { key: value, value }, value)))),
+                h(Field, { label: '动作频率' },
+                  h('select', { style: S.select, value: actionAdjust.frequency, onChange: (event) => setActionAdjust((current) => ({ ...current, frequency: event.target.value })) },
+                    h('option', { value: '' }, '不调整'),
+                    ...ACTION_ADJUST_OPTIONS.frequency.map((value) => h('option', { key: value, value }, value)))),
+                h(Field, { label: '动作时间' },
+                  h('select', { style: S.select, value: actionAdjust.duration, onChange: (event) => setActionAdjust((current) => ({ ...current, duration: event.target.value })) },
+                    h('option', { value: '' }, '不调整'),
+                    ...ACTION_ADJUST_OPTIONS.duration.map((value) => h('option', { key: value, value }, value)))),
+                h(Field, { label: '其它调整', hint: 'AI 会先查当前模型参数再保存。' },
+                  h('textarea', {
+                    style: { ...S.input, minHeight: 58 }, rows: 3, value: actionAdjust.note,
+                    placeholder: '例如：开头停半拍，再慢慢低头；只动头和眼睛',
+                    onChange: (event) => setActionAdjust((current) => ({ ...current, note: event.target.value })),
+                  })),
+                h('div', { style: S.row },
+                  h('button', {
+                    type: 'button', style: S.primary, disabled: !selectedAdjust || busy === 'action-adjust',
+                    onClick: () => selectedAdjust && sendActionAdjustment(selectedAdjust.action, selectedAdjust.kind),
+                  }, busy === 'action-adjust' ? '发送中…' : '发给 AI 调整'),
+                  selectedAdjust ? h('span', { style: S.dim }, `将调整「${selectedAdjust.action.label || selectedAdjust.action.id}」；会保存为同 ID 自定义覆盖层`) : null))
+              : h('div', null,
+                h('p', { style: S.hint }, '自己调整使用当前模型参数表，不调用 AI。载入后可修改起始、峰值、峰值时间和结束值。'),
+                h('button', {
+                  type: 'button', style: S.btn, disabled: !selectedAdjust,
+                  onClick: () => selectedAdjust && setSelfAdjustDraft(selfDraftFromAction(selectedAdjust.action)),
+                }, '载入当前动作参数表'),
+                selfAdjustDraft
+                  ? h('div', { style: { marginTop: 8 } },
+                    h(Field, { label: '动作时长（毫秒）' },
+                      h('input', {
+                        type: 'number', min: 200, max: 10000, step: 100, style: S.num,
+                        value: selfAdjustDraft.durationMs,
+                        onChange: (event) => setSelfAdjustDraft((current) => ({ ...current, durationMs: Number(event.target.value) || 200 })),
+                      })),
+                    renderSelfTable(selfAdjustDraft, setSelfAdjustDraft, target))
+                  : null),
           ),
 
           h(
             'div',
             { style: { ...S.card, marginTop: 12 } },
             h('p', { style: S.sub }, '新增动作'),
-            h('p', { style: S.warn }, '让 AI 设计自定义动作会消耗 Token；下面的「生成」只使用本地模板草稿，不调用模型。'),
+            h('div', { style: { ...S.row, marginTop: 6 } },
+              h('button', {
+                type: 'button', style: newAction.mode === 'ai' ? S.primary : S.btn,
+                onClick: () => setNewAction((current) => ({ ...current, mode: 'ai' })),
+              }, 'AI 设计（消耗 Token）'),
+              h('button', {
+                type: 'button', style: newAction.mode === 'self' ? S.primary : S.btn,
+                onClick: () => setNewAction((current) => ({ ...current, mode: 'self' })),
+              }, '自己设计（不消耗 Token）')),
             h(Field, { label: '动作名' },
               h('input', {
                 style: S.input, value: newAction.label, placeholder: '例如：得意',
-                onChange: (event) => setNewAction((current) => ({ ...current, label: event.target.value })),
+                onChange: (event) => setNewAction((current) => ({
+                  ...current,
+                  label: event.target.value,
+                  draft: current.draft ? { ...current.draft, label: event.target.value } : null,
+                })),
               })),
-            h(Field, { label: '动作说明', hint: '一句话描述想要的动作/情绪；点「生成」得到关键帧草稿，可先预览再保存。' },
-              h('textarea', {
-                style: { ...S.input, minHeight: 48 }, rows: 2,
-                value: newAction.description,
-                placeholder: '例如：抬起头、眯起眼睛，一副很得意的样子',
-                onChange: (event) => setNewAction((current) => ({ ...current, description: event.target.value })),
-              })),
-            h(
-              'div',
-              { style: S.row },
-              h('button', { type: 'button', style: S.btn, disabled: busy === 'design', onClick: designDraft }, busy === 'design' ? '生成中…' : '生成'),
-              h('button', { type: 'button', style: S.btn, disabled: !newAction.draft || busy === 'preview', onClick: previewDraft }, '预览'),
-              h('button', { type: 'button', style: S.primary, disabled: !newAction.draft || busy.startsWith('patch:'), onClick: saveDraft }, '保存动作'),
-            ),
-            newAction.draft
-              ? h('p', { style: S.dim },
-                `草稿：${newAction.draft.id}「${newAction.draft.label}」 · ${newAction.draft.tracks.length} 条轨道 · ${newAction.draft.durationMs}ms` +
-                (newAction.draft.matched ? `（模板：${newAction.draft.matched}）` : '（通用模板）'))
-              : h('p', { style: S.hint }, '提示：现成模板覆盖开心/难过/生气/惊讶/害羞/困倦/思考/招手；更细的可以由 AI 在对话里用 live2d_preset 自己设计。'),
+            newAction.mode === 'ai'
+              ? h('div', null,
+                h('p', { style: S.warn }, 'AI 设计会调用当前对话，消耗 Token。'),
+                h(Field, { label: '动作说明', hint: '描述想要的动作、情绪、身体幅度和时长；AI 会先查当前模型参数再保存。' },
+                  h('textarea', {
+                    style: { ...S.input, minHeight: 48 }, rows: 2, value: newAction.description,
+                    placeholder: '例如：先大幅挥手，然后开心地转一下身体，约 3 秒',
+                    onChange: (event) => setNewAction((current) => ({ ...current, description: event.target.value })),
+                  })),
+                h('button', { type: 'button', style: S.primary, disabled: busy === 'design-ai', onClick: sendAiActionDesign },
+                  busy === 'design-ai' ? '发送中…' : '发给 AI 设计'))
+              : h('div', null,
+                h('p', { style: S.hint }, '自己设计完全不调用 AI。用当前模型真实参数表编辑关键帧，并可直接预览未保存草稿。'),
+                h(Field, { label: '动作 ID', hint: '小写字母开头，只使用 a-z、0-9、_、-' },
+                  h('input', {
+                    style: S.input, value: newAction.draft?.id || newAction.id, placeholder: '例如：happy-wave',
+                    onChange: (event) => setNewAction((current) => ({
+                      ...current,
+                      id: event.target.value,
+                      draft: current.draft ? { ...current.draft, id: event.target.value } : null,
+                    })),
+                  })),
+                h(Field, { label: '动作时长（毫秒）' },
+                  h('input', {
+                    type: 'number', min: 200, max: 10000, step: 100, style: S.num,
+                    value: newAction.draft?.durationMs ?? newAction.durationMs,
+                    onChange: (event) => setNewAction((current) => ({
+                      ...current, durationMs: Number(event.target.value) || 200,
+                      draft: current.draft ? { ...current.draft, durationMs: Number(event.target.value) || 200 } : null,
+                    })),
+                  })),
+                h('button', {
+                  type: 'button', style: S.btn,
+                  onClick: () => setNewAction((current) => ({
+                    ...current,
+                    draft: current.draft || {
+                      id: String(current.id || `c-${Date.now().toString(36).slice(-6)}`).trim(),
+                      label: current.label || current.id || '自定义动作',
+                      durationMs: Number(current.durationMs) || 2000,
+                      tracks: [],
+                    },
+                  })),
+                }, newAction.draft ? '重新创建一个空参数草稿' : '创建参数草稿'),
+                newAction.draft ? renderSelfTable(newAction.draft, (updater) => setNewAction((current) => ({
+                  ...current,
+                  draft: typeof updater === 'function' ? updater(current.draft) : updater,
+                })), target) : null),
           ),
 
           h(
@@ -1904,6 +2209,9 @@ window.__ModuleLoader__.load({
           wakeCaptureEnabled: true,
           wakeDriver: 'timer',
           lifeEnabled: true,
+          moodTraceEnabled: true,
+          preserveIndependentHolds: true,
+          selfInspectEnabled: true,
           lifeNonverbalEnabled: true,
           lifeFarewellEnabled: true,
           aiMoveEnabled: true,
@@ -1924,7 +2232,7 @@ window.__ModuleLoader__.load({
             h('p', { style: { ...S.hint, marginTop: 6 } }, `当前模式：${current}（在窗口工具栏或「模型」页切换）`),
             target.life
               ? h('p', { style: { ...S.hint, marginTop: 4 } },
-                `陪伴状态：${target.life.attention || '未知'} · 意愿 ${target.life.willingness || 'social'} · 精力 ${Math.round(Number(target.life.energy) * 100)}% · 心情 ${Number(target.life.mood).toFixed(2)} · 今日分享 ${target.life.dailyShare}/${target.life.dailyShareMax}`)
+                `陪伴状态：${target.life.attention || '未知'} · 意愿 ${target.life.willingness || 'social'} · 精力 ${Math.round(Number(target.life.energy) * 100)}% · 心情 ${Number(target.life.mood).toFixed(2)}${target.life.moodReason ? `（${target.life.moodReason}）` : ''} · 今日分享 ${target.life.dailyShare}/${target.life.dailyShareMax}`)
               : null,
             h('div', { style: { ...S.row, marginTop: 8, flexWrap: 'wrap', gap: 8 } },
               h('button', { type: 'button', style: S.primary, disabled: busy === `patch:${target.id}`, onClick: enableAll }, '一键开启模式所需开关'),
@@ -1933,6 +2241,7 @@ window.__ModuleLoader__.load({
           ),
           group('共享 · 不消耗 Token', '启用后由「手动 / AI 半自动 / AI 自动」三种模式共享：只看状态并做静默反应，不调用模型。', [
             h(Field, { label: '生命感循环', hint: '关闭后不计算陪伴状态，也不做静默回应。' }, toggle('lifeEnabled')),
+            h(Field, { label: '心情变化记录', hint: '开启后记录最近一天因聊天、摸头、独处等事情造成的心情变化，并显示在右键“状态”里。' }, toggle('moodTraceEnabled')),
             h(Field, { label: '静默非语言回应', hint: '回来、专注、应用切换、长时间独处时，自动看向/点头/眨眼，不发气泡。' },
               toggle('lifeNonverbalEnabled'), num('lifeNonverbalCooldownMs', 3, 300, 1, '秒冷却', { ms: true })),
             h(Field, { label: '观众在场判断', hint: '你离开或长时间无输入时，不再对着空气做大幅动作，只保留呼吸和少量眨眼。' },
@@ -1947,6 +2256,8 @@ window.__ModuleLoader__.load({
               toggle('memoryEnabled'), num('memoryMaxEntries', 20, 500, 10, '条上限')),
             h(MemoryPanel, { instanceId: target.id, sessionId: cfg.sessionId || '', enabled: cfg.memoryEnabled === true }),
             h(Field, { label: '停机告别', hint: '窗口关闭、模型停用或插件卸载时，先显示一句本地告别再退出。' }, toggle('lifeFarewellEnabled')),
+            h(Field, { label: '保留不同骨架的保持动作', hint: '开启后，面部表情和换装、手势等使用不同参数的保持动作可以同时存在；关闭后新的保持动作会清掉上一个。' }, toggle('preserveIndependentHolds')),
+            h(Field, { label: '允许 AI 查看自己的模型窗口', hint: 'AI 可捕获当前 Live2D 窗口检查动作效果；不截桌面其他区域。' }, toggle('selfInspectEnabled')),
           ]),
           group('手动', `内部模式 auto。只有你点 ⚡ 或摸模型才与 AI 交互；不消耗 Token 的共享陪伴行为仍可运行。`, [
             h(Field, { label: '读屏 · 前台标题', hint: '只读当前窗口标题（不截图），用来说明你在什么软件里。数字是读取间隔；⚡ 唤醒每次都会现读一次，不需要定时。' },
@@ -1956,6 +2267,7 @@ window.__ModuleLoader__.load({
             h(Field, { label: '截图免确认', hint: '开启后唤醒/工具截图不再先问一句；总开关关掉时不生效' }, toggle('screenCaptureAutoConfirm')),
             h(Field, { label: '点模型有反应' }, toggle('autoInteract')),
             h(Field, { label: '空闲小动作', hint: '闲着时随机眨眼/歪头' }, toggle('idlePresets')),
+            h(Field, { label: '允许对话里的工具控制模型', hint: '只在你当前对话中调用工具时放行，不会让模型定时或自行启动；行动作、气泡、读屏等仍可继续受各自开关限制。' }, toggle('manualToolsEnabled')),
           ]),
           group('AI 半自动 / AI 自动 · 消耗 Token 的主动感知', '两种 AI 模式共用的主动说话方式。只能选择「定时唤醒」或「事件唤醒」之一；切换模式不会自动打开它，仍由下面单独控制。', [
             h(Field, { label: '主动感知方式', hint: '关闭 = 不主动调用 AI；定时 = 每隔一段时间看一眼；事件 = 回来或专注达到阈值时才看一眼。按钮 ⚡ 随时仍可使用。' },
@@ -2090,7 +2402,7 @@ window.__ModuleLoader__.load({
           h(Row, { label: '实例数', children: `${instances.length} / 2` }),
           h(Row, { label: '窗口进程', children: health?.windowRunning ? '在跑' : '未运行' }),
           h(Row, { label: '默认实例模型', children: model.ok ? `ok · ${model.entry || ''}` : `不可用：${model.reason || '未探测'}` }),
-          h(Row, { label: '模型扫描根', children: modelRoots.length ? modelRoots.join('、') : 'D:\\Live2D（默认）' }),
+          h(Row, { label: '模型扫描根', children: modelRoots.length ? modelRoots.join('、') : '用户目录下的 Live2D（默认）' }),
           renderer.lastError ? h('p', { style: S.warn }, `最近渲染错误：${renderer.lastError}`) : null,
         ),
 

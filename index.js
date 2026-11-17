@@ -39,14 +39,14 @@ export const name = 'live2d'
 // 并用 /live2d/diag 同时记录「ctx.<name> 与 ctx.get(name) 各自拿到什么」，把结论坐实。
 export const inject = ['webServer', 'sessions', 'agents', 'sessionTitle', 'tools']
 
-export const VERSION = '0.2.0'
+export const VERSION = '0.3.0'
 export const STAGE = 'P2-P3'
 
 // 插件自身目录：用来定位 electron/main.cjs（不依赖宿主包的 dsh-home-paths）
 export const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
 
 // /live2d/models 的默认扫描根（用户可改 config.modelRoots）
-export const DEFAULT_MODEL_ROOT = 'D:\\Live2D'
+export const DEFAULT_MODEL_ROOT = path.join(os.homedir(), 'Live2D')
 
 export const DEFAULT_INSTANCE = {
   id: 'inst-1',
@@ -54,7 +54,7 @@ export const DEFAULT_INSTANCE = {
   enabled: true,
   // 绑定的会话（空 = 自动解析）
   sessionId: '',
-  modelPath: '',
+  modelPath: path.join(os.homedir(), 'Live2D', 'Models'),
   // /live2d/models 的扫描根（空 = 用 DEFAULT_MODEL_ROOT）；换机器 / 换模型库时改这里
   modelRoots: [],
   windowWidth: 320,
@@ -90,6 +90,8 @@ export const DEFAULT_INSTANCE = {
   motionStrength: 60,
   // 自动模式预设交互：用户点模型/摸头有反应（用户主动点，不是 AI 控制）
   autoInteract: true,
+  // 换装/表情等“保持型动作”是否按参数骨架分别保留；关闭 1 个表情、换衣等不同参数动作会互相打断
+  preserveIndependentHolds: true,
   // 空闲小动作：没人理的时候偶尔眨眼/歪头（auto 模式的「有生气」部分）
   idlePresets: true,
   // P2：观众在场判断；没有观众时只做低幅度动作。
@@ -104,7 +106,7 @@ export const DEFAULT_INSTANCE = {
   presetSequences: [],
   // 阶段 4：读屏第一层（只读前台窗口标题，不截图）
   // 0.13.9：模式功能默认可用——半自动/主动唤醒要读标题才「知道你在干什么」，
-  // 关掉会让「切模式」看起来毫无区别（用户反馈）。想关可在「模式设置」里关。
+  // 关掉会让「切模式」看起来毫无区别（用户 m13380）。想关可在「模式设置」里关。
   screenReadEnabled: true,
   // 定时感知：后台每隔 N 秒读一次前台标题（只读标题、不落盘；auto 模式跳过）
   screenWatchEnabled: false,
@@ -140,13 +142,15 @@ export const DEFAULT_INSTANCE = {
   wakeDriver: 'off',
   wakeEnabled: false,
   wakeIntervalMs: 30_000,
-  // 唤醒时截图：不打开的话唤醒只能读到窗口标题（用户实测后要求默认开）
+  // 唤醒时截图：不打开的话唤醒只能读到窗口标题（用户 m13615 实测后要求默认开）
   wakeCaptureEnabled: true,
   wakeMaxPerHour: 60,
   wakeTimeoutMs: 120_000,
   // P1 陪伴行为：宿主持续维护的“生命感”状态。
   // 非语言回应默认开启（不调用模型）；事件主动说话默认关闭，避免升级后突然打扰。
   lifeEnabled: true,
+  // 心情变化记录：最近每天因什么事上升/下降
+  moodTraceEnabled: true,
   lifeNonverbalEnabled: true,
   lifeNonverbalCooldownMs: 12_000,
   eventWakeEnabled: false,
@@ -162,8 +166,12 @@ export const DEFAULT_INSTANCE = {
   eventQuietEnd: '08:00',
   lifeFarewellEnabled: true,
   // 0.13.0：AI 自主移动/缩放窗口（仅 manual 模式生效）
-  // 0.13.9：默认开——否则「AI 自动」和普通模式看不出区别（用户反馈）
+  // 0.13.9：默认开——否则「AI 自动」和普通模式看不出区别（用户 m13380）
   aiMoveEnabled: true,
+  // 手动模式默认仍不允许 AI 主动工具调用；打开后只放行当前用户对话里的工具请求。
+  manualToolsEnabled: false,
+  // 允许 AI 捕获“自己的模型窗口”检查动作结果；不截桌面其它区域。
+  selfInspectEnabled: true,
 }
 
 export const DEFAULT_CONFIG = {
@@ -400,9 +408,13 @@ function normalizeBoundSession(value, warnings) {
 // 自定义动作的通用校验：动作定义只描述「参数 → 关键帧」，不绑定某一只模型。
 // 参数可以写逻辑名（headX / eyeOpenL / mouthOpen…），渲染层按模型实际参数解析，缺了就跳轨。
 const ACTION_ID_RE = /^[a-z][a-z0-9_-]{1,23}$/
-const ACTION_LIMIT = 20
-const TRACK_LIMIT = 8
-const KEY_LIMIT = 12
+// IDLE/换装/表情/动作文件会共用这个上限；DeepSeek 这类模型单是模型自带能力就有 30+ 项。
+const ACTION_LIMIT = 48
+const TRACK_LIMIT = 20
+// 姿势设计器会把「起始 / 中间… / 最终」直接映射成关键帧。
+// 12 个关键帧只够放下 10 个中间姿势，继续增加时保存会被静默截断；提高到 32，
+// 与编辑器的步骤上限保持一致，同时仍给单动作体积留下明确边界。
+const KEY_LIMIT = 32
 
 export function normalizeCustomActions(raw, warnings = []) {
   if (raw === undefined || raw === null) return []
@@ -454,6 +466,8 @@ export function normalizeCustomActions(raw, warnings = []) {
       desc: typeof item?.desc === 'string' ? item.desc.slice(0, 40) : '',
       group: typeof item?.group === 'string' ? item.group.slice(0, 16) : '',
       auto: item?.auto === true,
+      repeat: Math.max(1, Math.min(6, Math.round(Number(item?.repeat) || 1))),
+      body: item?.body === true,
       tracks,
     })
   }
@@ -531,6 +545,7 @@ function normalizeInstance(raw, index, warnings) {
     dragInertia: boolOr(source.dragInertia, DEFAULT_INSTANCE.dragInertia, 'dragInertia', warnings),
     motionStrength: clampInt(source.motionStrength, LIMITS.motionStrength, 'motionStrength', warnings),
     autoInteract: boolOr(source.autoInteract, DEFAULT_INSTANCE.autoInteract, 'autoInteract', warnings),
+    preserveIndependentHolds: boolOr(source.preserveIndependentHolds, DEFAULT_INSTANCE.preserveIndependentHolds, 'preserveIndependentHolds', warnings),
     idlePresets: boolOr(source.idlePresets, DEFAULT_INSTANCE.idlePresets, 'idlePresets', warnings),
     audienceAwareEnabled: boolOr(source.audienceAwareEnabled, DEFAULT_INSTANCE.audienceAwareEnabled, 'audienceAwareEnabled', warnings),
     memoryEnabled: boolOr(source.memoryEnabled, DEFAULT_INSTANCE.memoryEnabled, 'memoryEnabled', warnings),
@@ -570,6 +585,7 @@ function normalizeInstance(raw, index, warnings) {
     wakeMaxPerHour: clampInt(source.wakeMaxPerHour, LIMITS.wakeMaxPerHour, 'wakeMaxPerHour', warnings),
     wakeTimeoutMs: clampInt(source.wakeTimeoutMs, LIMITS.wakeTimeoutMs, 'wakeTimeoutMs', warnings),
     lifeEnabled: boolOr(source.lifeEnabled, DEFAULT_INSTANCE.lifeEnabled, 'lifeEnabled', warnings),
+    moodTraceEnabled: boolOr(source.moodTraceEnabled, DEFAULT_INSTANCE.moodTraceEnabled, 'moodTraceEnabled', warnings),
     lifeNonverbalEnabled: boolOr(source.lifeNonverbalEnabled, DEFAULT_INSTANCE.lifeNonverbalEnabled, 'lifeNonverbalEnabled', warnings),
     lifeNonverbalCooldownMs: clampInt(source.lifeNonverbalCooldownMs, LIMITS.lifeNonverbalCooldownMs, 'lifeNonverbalCooldownMs', warnings),
     eventWakeEnabled: wakeDriver === 'event',
@@ -585,6 +601,9 @@ function normalizeInstance(raw, index, warnings) {
     eventQuietEnd: normalizeClock(source.eventQuietEnd, DEFAULT_INSTANCE.eventQuietEnd, 'eventQuietEnd', warnings),
     lifeFarewellEnabled: boolOr(source.lifeFarewellEnabled, DEFAULT_INSTANCE.lifeFarewellEnabled, 'lifeFarewellEnabled', warnings),
     aiMoveEnabled: boolOr(source.aiMoveEnabled, DEFAULT_INSTANCE.aiMoveEnabled, 'aiMoveEnabled', warnings),
+    // 手动模式仍是“不主动”，但允许当前用户对话里 AI 调用模型工具
+    manualToolsEnabled: boolOr(source.manualToolsEnabled, DEFAULT_INSTANCE.manualToolsEnabled, 'manualToolsEnabled', warnings),
+    selfInspectEnabled: boolOr(source.selfInspectEnabled, DEFAULT_INSTANCE.selfInspectEnabled, 'selfInspectEnabled', warnings),
   }
 }
 
@@ -593,7 +612,7 @@ const INSTANCE_KEYS = [
   'rendererEnabled', 'clickThrough', 'modelPassthrough', 'adjustMode', 'pinned', 'replyStyle', 'bubbleSkin', 'replyOpacity', 'sessionId', 'boundSessionId',
   'replyFontSize', 'replyMaxHeightPct', 'replyHeightRatio', 'bubbleFixedSize', 'bubbleHeightPx',
   'modelScalePct', 'modelLayoutMode',
-  'idleFloat', 'lookFollow', 'dragInertia', 'motionStrength', 'autoInteract', 'idlePresets',
+  'idleFloat', 'lookFollow', 'dragInertia', 'motionStrength', 'autoInteract', 'preserveIndependentHolds', 'idlePresets',
   'audienceAwareEnabled', 'memoryEnabled', 'memoryMaxEntries', 'dualRelationEnabled',
   'customActions', 'presetSequences',
   'bubbleDurationMs', 'bubbleQueueLimit', 'bubbleMaxChars', 'autoOpenWindow',
@@ -603,13 +622,13 @@ const INSTANCE_KEYS = [
   'ttsEnabled', 'ttsAutoSpeak', 'ttsUrl', 'ttsPrompt', 'ttsPromptText',
   'showLateReply', 'chatTimeoutMs', 'mode', 'autoBubble',
   'wakeDriver', 'wakeEnabled', 'wakeIntervalMs', 'wakeCaptureEnabled', 'wakeMaxPerHour', 'wakeTimeoutMs',
-  'lifeEnabled', 'lifeNonverbalEnabled', 'lifeNonverbalCooldownMs',
+  'lifeEnabled', 'moodTraceEnabled', 'lifeNonverbalEnabled', 'lifeNonverbalCooldownMs',
   'eventWakeEnabled', 'eventWakeFocusMs', 'eventWakeAwayMs', 'eventWakeTitleIntervalMs',
   'eventWakeCooldownMs', 'eventWakeMaxPerHour',
   'lifeShareBudgetPerDay', 'lifeImportantBudgetPerDay',
   'eventQuietEnabled', 'eventQuietStart', 'eventQuietEnd',
   'lifeFarewellEnabled',
-  'aiMoveEnabled',
+  'aiMoveEnabled', 'manualToolsEnabled', 'selfInspectEnabled',
 ]
 
 export function normalizeConfig(raw) {
@@ -836,6 +855,15 @@ export function normalizeCapabilities(raw, warnings = []) {
       label,
       file: typeof item?.file === 'string' ? item.file.slice(0, 120) : '',
       registered: item?.registered === true,
+      durationMs: Math.min(10_000, Math.max(100, Math.round(Number(item?.durationMs) || 0))),
+      group: typeof item?.group === 'string' ? item.group.slice(0, 12) : 'gesture',
+      tracks: (Array.isArray(item?.tracks) ? item.tracks : [])
+        .filter((track) => track && typeof track.param === 'string' && Array.isArray(track.keys) && track.keys.length)
+        .slice(0, TRACK_LIMIT)
+        .map((track) => ({
+          param: track.param.slice(0, 40),
+          keys: track.keys.slice(0, KEY_LIMIT),
+        })),
     })
   }
   if (!expressions.length && !motions.length) {
@@ -958,6 +986,10 @@ export function ensureAutoActions(state, inst, log = null, options = {}) {
   const params = target?.rendererParams?.params
     ?? target?.renderer?.params?.params
     ?? root.renderer?.params?.params
+  const paramMeta = target?.rendererParams?.paramMeta
+    ?? target?.renderer?.params?.paramMeta
+    ?? root.renderer?.params?.paramMeta
+    ?? {}
   if (!Array.isArray(params) || params.length < 5) return { ok: false, code: 'no-params' }
   const ensured = ensureProfileFor(root, target)
   if (!ensured.ok) return { ok: false, code: ensured.code }
@@ -987,7 +1019,7 @@ export function ensureAutoActions(state, inst, log = null, options = {}) {
   }
   const patch = {}
   if (needAuto) {
-    const picked = pickDefaultActions(params, 10)
+    const picked = pickDefaultActions(params, 10, paramMeta)
     patch.autoActions = picked
     patch.autoActionsHash = hash
   }
@@ -1021,7 +1053,7 @@ export function ensureAutoActions(state, inst, log = null, options = {}) {
         const playable = (profileNow.capabilityActions ?? []).length
         const lines = [`这只模型我摸过了：${bits.join('、') || '没找到表情/换装'}。`]
         if (playable) lines.push(`其中 ${playable} 个能直接用，已经放进右键菜单——点一次开，再点一次关。`)
-        if (caps.motions.length) lines.push(`另外有 ${caps.motions.length} 个动画文件（${caps.motions.slice(0, 3).map((item) => item.label).join('、')}…），模型没登记，暂时播不了。`)
+        if (caps.motions.length) lines.push(`另外有 ${caps.motions.length} 个未登记动画（${caps.motions.slice(0, 3).map((item) => item.label).join('、')}…），我已经直接解析进“模型自带”动作。`)
         instanceView(root, target).windows.send({
           type: 'bubble',
           text: lines.join(' '),
@@ -1041,6 +1073,64 @@ export function ensureAutoActions(state, inst, log = null, options = {}) {
     count: profileNow.autoActions?.length ?? 0,
     capabilityCount: profileNow.capabilityActions?.length ?? 0,
     capabilities: profileNow.capabilities ?? null,
+  }
+}
+
+/**
+ * 0.3.0：移除旧版自动注入的「跳舞（10秒示例）」。
+ * 只删除固定 ID，不影响自建舞蹈、默认「全身舞动」或 AI 在“跳个舞”时新设计的动作。
+ */
+export const LEGACY_DEMO_DANCE_ID = 'demo-dance-10s'
+
+export function removeLegacyDemoDanceActions(state, marker = '0.3.0-remove-demo-dance') {
+  const root = state?.root ?? state
+  if (!root?.config) return { changed: false, marked: false, removed: {} }
+  const migrated = Array.isArray(root.config.migrated) ? root.config.migrated : []
+  if (migrated.includes(marker)) return { changed: false, marked: false, removed: {} }
+  const removed = { profiles: 0, instances: 0, sequences: 0 }
+  for (const [id, profile] of Object.entries(root.config.modelProfiles ?? {})) {
+    const actions = Array.isArray(profile?.customActions) ? profile.customActions : []
+    const nextActions = actions.filter((item) => item?.id !== LEGACY_DEMO_DANCE_ID)
+    const sequences = Array.isArray(profile?.presetSequences) ? profile.presetSequences : []
+    let sequenceChanged = false
+    const nextSequences = sequences
+      .map((seq) => {
+        const oldSteps = Array.isArray(seq?.steps) ? seq.steps : []
+        const steps = oldSteps.filter((step) => step !== LEGACY_DEMO_DANCE_ID)
+        if (steps.length !== oldSteps.length) sequenceChanged = true
+        return { ...seq, steps }
+      })
+      .filter((seq) => seq.steps.length > 0)
+    if (nextActions.length !== actions.length) removed.profiles += 1
+    if (sequenceChanged || nextSequences.length !== sequences.length) removed.sequences += 1
+    root.config.modelProfiles[id] = {
+      ...profile,
+      customActions: nextActions,
+      presetSequences: nextSequences,
+    }
+  }
+  for (const inst of root.config.instances ?? []) {
+    const actions = Array.isArray(inst.customActions) ? inst.customActions : []
+    const nextActions = actions.filter((item) => item?.id !== LEGACY_DEMO_DANCE_ID)
+    const sequences = Array.isArray(inst.presetSequences) ? inst.presetSequences : []
+    let sequenceChanged = false
+    const nextSequences = sequences
+      .map((seq) => {
+        const oldSteps = Array.isArray(seq?.steps) ? seq.steps : []
+        const steps = oldSteps.filter((step) => step !== LEGACY_DEMO_DANCE_ID)
+        if (steps.length !== oldSteps.length) sequenceChanged = true
+        return { ...seq, steps }
+      })
+      .filter((seq) => seq.steps.length > 0)
+    if (nextActions.length !== actions.length || sequenceChanged || nextSequences.length !== sequences.length) removed.instances += 1
+    inst.customActions = nextActions
+    inst.presetSequences = nextSequences
+  }
+  root.config.migrated = [...migrated, marker]
+  return {
+    changed: removed.profiles + removed.instances + removed.sequences > 0,
+    marked: true,
+    removed,
   }
 }
 
@@ -1065,6 +1155,20 @@ export function createLifeRuntime(seed = {}, now = Date.now()) {
     systemIdleAt: 0,
     energy: numberIn(seed.energy, 0, 1, 0.72),
     mood: numberIn(seed.mood, -1, 1, 0.08),
+    lastMoodDelta: numberIn(seed.lastMoodDelta, -2, 2, 0),
+    lastMoodReason: typeof seed.lastMoodReason === 'string' ? seed.lastMoodReason.slice(0, 80) : '',
+    lastMoodAt: numberIn(seed.lastMoodAt, 0, now, 0),
+    moodEvents: Array.isArray(seed.moodEvents)
+      ? seed.moodEvents
+          .filter((item) => item && Number.isFinite(Number(item.at)))
+          .slice(-20)
+          .map((item) => ({
+            at: Number(item.at),
+            delta: Math.max(-1, Math.min(1, Number(item.delta) || 0)),
+            reason: typeof item.reason === 'string' ? item.reason.slice(0, 80) : '',
+            source: typeof item.source === 'string' ? item.source.slice(0, 24) : '',
+          }))
+      : [],
     boredom: numberIn(seed.boredom, 0, 1, 0.1),
     closeness: numberIn(seed.closeness, 0, 1, 0),
     lastTickAt: now,
@@ -1197,6 +1301,10 @@ function persistedLife(runtime) {
     foregroundSince: runtime.foregroundSince,
     energy: runtime.energy,
     mood: runtime.mood,
+    lastMoodDelta: runtime.lastMoodDelta,
+    lastMoodReason: runtime.lastMoodReason,
+    lastMoodAt: runtime.lastMoodAt,
+    moodEvents: runtime.moodEvents,
     boredom: runtime.boredom,
     closeness: runtime.closeness,
     lastNonverbalAt: runtime.lastNonverbalAt,
@@ -1486,6 +1594,31 @@ export function memoryPromptLines(state, inst, query = '', limit = 4) {
   ]
 }
 
+function recordMoodChange(runtime, delta, reason, source, now, config) {
+  if (config?.lifeEnabled === false) return 0
+  const before = Number(runtime.mood) || 0
+  const next = Math.max(-1, Math.min(1, before + Number(delta || 0)))
+  runtime.mood = next
+  if (config?.moodTraceEnabled === false) return 0
+  const actual = next - before
+  if (Math.abs(actual) < 0.001) return actual
+  runtime.lastMoodDelta = actual
+  runtime.lastMoodReason = String(reason ?? '').slice(0, 80)
+  runtime.lastMoodAt = now
+  const events = Array.isArray(runtime.moodEvents) ? runtime.moodEvents : []
+  const last = events.at(-1)
+  if (last && last.reason === runtime.lastMoodReason && last.source === source && now - Number(last.at) < 10 * 60_000) {
+    last.at = now
+    last.delta = Math.max(-1, Math.min(1, Number(last.delta) + actual))
+  } else {
+    events.push({ at: now, delta: actual, reason: runtime.lastMoodReason, source })
+  }
+  runtime.moodEvents = events
+    .filter((item) => now - Number(item.at) < 24 * 60 * 60 * 1000)
+    .slice(-20)
+  return actual
+}
+
 function updateLifeNeeds(runtime, config, attention, now, interacted = false) {
   const dtHours = Math.min(1, Math.max(0, (now - Number(runtime.lastTickAt ?? now)) / 3_600_000))
   if (attention === 'active' || attention === 'focused') {
@@ -1497,11 +1630,15 @@ function updateLifeNeeds(runtime, config, attention, now, interacted = false) {
   }
   if (interacted) {
     runtime.energy = Math.min(1, runtime.energy + 0.025)
-    runtime.mood = Math.min(1, runtime.mood + 0.08)
+    recordMoodChange(runtime, 0.08, '和你互动让我心情变好', 'interaction', now, config)
     runtime.boredom = Math.max(0, runtime.boredom - 0.22)
     runtime.closeness = Math.min(1, runtime.closeness + 0.01)
   } else {
-    runtime.mood += (0 - runtime.mood) * Math.min(1, dtHours * 1.5)
+    const drift = (0 - runtime.mood) * Math.min(1, dtHours * 1.5)
+    const reason = attention === 'active' || attention === 'focused'
+      ? '长时间专注后情绪逐渐平稳'
+      : '安静独处时情绪自然回落'
+    recordMoodChange(runtime, drift, reason, 'drift', now, config)
   }
   runtime.lastTickAt = now
 }
@@ -1633,26 +1770,72 @@ export function canControl(inst, capability, ctx = {}) {
     case 'anim':
     case 'action':
       // source='ui' = 用户在设置页/右键菜单亲手点，不受模式限制；
-      // 用户在 auto 里点 ⚡ 也不放开 AI 动作（用户确认）
+      // 用户在 auto 里点 ⚡ 也不放开 AI 动作（用户 m11528 确认）
       if (source === 'ui') return true
+      if (mode === 'auto' && source === 'tool' && inst?.config?.manualToolsEnabled === true) return true
       return mode !== 'auto'
     case 'bubble':
       if (source === 'window-chat') return true // 用户在窗口里说话，auto 也要回
       if (source === 'wake-button') return true // 用户主动唤醒，auto 也要回
+      if (mode === 'auto' && source === 'tool' && inst?.config?.manualToolsEnabled === true) return true
       if (source === 'wake-timer') return mode !== 'auto'
       return mode !== 'auto' // external-chat / tool
     case 'screen':
     case 'capture':
       if (source === 'wake-button') return true // 按钮 = 本次授权
+      if (mode === 'auto' && source === 'tool' && inst?.config?.manualToolsEnabled === true) return true
       return mode !== 'auto'
+    case 'self-view':
+      return inst?.config?.selfInspectEnabled !== false
+        && (mode !== 'auto' || (source === 'tool' && inst?.config?.manualToolsEnabled === true))
     case 'window':
       // 移动/缩放窗口：只有手动 + 显式开启 aiMoveEnabled
-      return mode === 'manual' && inst?.config?.aiMoveEnabled === true
+      return (mode === 'manual' || (mode === 'auto' && source === 'tool' && inst?.config?.manualToolsEnabled === true))
+        && inst?.config?.aiMoveEnabled === true
     case 'wake':
       if (source === 'wake-button') return true
       return mode !== 'auto'
     default:
       return false
+  }
+}
+
+/**
+ * 自动模式（内部 manual）里，AI 主动调用动作时根据生命状态调整速度与幅度。
+ * 半自动（semi）保持用户/AI 指定的动作原样，不叠加生命感。
+ */
+export function performanceForAction(inst, source = 'tool') {
+  if (source !== 'tool' || normalMode(inst) !== 'manual' || inst?.config?.lifeEnabled === false) return null
+  const life = inst?.life
+  if (!life) return { speed: 1, amplitude: 1, mood: 0, energy: 0.7, reason: '暂无生命状态' }
+  const mood = Math.max(-1, Math.min(1, Number(life.mood) || 0))
+  const energy = Math.max(0, Math.min(1, Number(life.energy) || 0))
+  const will = lifeWillingness(inst)
+  let speed = 1 + mood * 0.2 + (energy - 0.5) * 0.22
+  let amplitude = 1.06 + mood * 0.25 + (energy - 0.5) * 0.18
+  if (will.state === 'tired') {
+    speed *= 0.82
+    amplitude *= 0.78
+  } else if (will.state === 'withdrawn') {
+    speed *= 0.7
+    amplitude *= 0.65
+  }
+  speed = Math.max(0.65, Math.min(1.45, speed))
+  amplitude = Math.max(0.6, Math.min(1.45, amplitude))
+  const reason = mood >= 0.35
+    ? '心情很好，动作更活泼'
+    : mood <= -0.35
+      ? '心情低落，动作放慢收敛'
+      : energy <= 0.35
+        ? '精力不足，动作变慢'
+        : '按当前状态自然调整'
+  return {
+    speed: Math.round(speed * 100) / 100,
+    amplitude: Math.round(amplitude * 100) / 100,
+    mood: Math.round(mood * 100) / 100,
+    energy: Math.round(energy * 100) / 100,
+    willingness: will.state,
+    reason,
   }
 }
 
@@ -1667,15 +1850,18 @@ export async function waitForBounds(inst, beforeAt = 0, timeoutMs = 1800) {
   return null
 }
 
-export function modeForbidden(inst, capability) {  return {
+export function modeForbidden(inst, capability) {  const canEnableManualTools = normalMode(inst) === 'auto' && inst?.config?.manualToolsEnabled !== true
+  return {
     ok: false,
     status: 403,
     code: 'mode-forbidden',
     mode: inst?.config?.mode ?? 'auto',
     capability,
-    error: `当前是「手动」模式，AI 不会主动${
+    error: `当前是「手动」模式，AI 不会主动${ 
       capability === 'anim' ? '播放动作' : capability === 'bubble' ? '推送气泡' : '读屏'
-    }（想让它主动，可在设置页或窗口模式菜单里切到「AI 半自动 / AI 自动」）`,
+    }（${canEnableManualTools
+      ? '可在设置页「模式设置 → 手动」打开“允许对话里的工具控制模型”，或切到「AI 半自动 / AI 自动」'
+      : '当前对话工具权限已被设置页其他开关限制'}）`,
   }
 }
 
@@ -1953,6 +2139,12 @@ export function lifeStatusSnapshot(inst) {
     willingness: life.willingness ?? 'social',
     energy: Number(life.energy) || 0,
     mood: Number(life.mood) || 0,
+    moodDelta: Number(life.lastMoodDelta) || 0,
+    moodReason: typeof life.lastMoodReason === 'string' ? life.lastMoodReason : '',
+    moodAt: Number(life.lastMoodAt) || 0,
+    moodEvents: Array.isArray(life.moodEvents)
+      ? life.moodEvents.filter((item) => Date.now() - Number(item.at) < 24 * 60 * 60 * 1000).slice(-8)
+      : [],
     boredom: Number(life.boredom) || 0,
     closeness: Number(life.closeness) || 0,
     peerAffinity: Number(life.peerAffinity) || 0,
@@ -2127,7 +2319,7 @@ export const PERSISTED_KEYS = [
   'migrated',
 ]
 
-/** 模式功能开关：关掉会让「切模式」看不出区别，故决定默认开（用户反馈）。 */
+/** 模式功能开关：关掉会让「切模式」看不出区别，故决定默认开（用户 m13380）。 */
 export const MODE_SWITCH_KEYS = ['screenReadEnabled', 'screenCaptureEnabled', 'wakeCaptureEnabled', 'wakeEnabled', 'aiMoveEnabled']
 
 /**
@@ -2156,7 +2348,7 @@ export function migrateModeSwitches(state, marker = '0.13.9-mode-switches') {
 
 /**
  * 0.3.2 一次性迁移：把实例上的 customActions / presetSequences 搬进「模型档案」。
- * 流程（用户要求）：备份 → 创建/合并档案 → 校验 → 原子写盘 → 确认成功后再清空实例字段 → 迁移报告。
+ * 流程（用户 m16320 要求）：备份 → 创建/合并档案 → 校验 → 原子写盘 → 确认成功后再清空实例字段 → 迁移报告。
  * 这个函数只做「计算 + 改内存」，写盘与清空交给调用方（apply），保证「先写盘成功再清空」。
  */
 export function migrateModelProfiles(state, marker = '0.3.2-model-profiles') {
@@ -3086,6 +3278,37 @@ export function pruneCaptureDir(dir = CAPTURE_DIR, keep = CAPTURE_KEEP) {
   } catch {
     return 0
   }
+}
+
+/** 捕获当前 Live2D 窗口本身（不是全屏），用于 AI 检查动作姿态。 */
+export async function captureOwnWindow(state, options = {}) {
+  const view = state?.root ? state : instanceView(state?.root ?? state, state)
+  const root = view?.root ?? state?.root ?? state
+  if (!view || !root) return { ok: false, error: '没有可用的模型实例' }
+  if (view.config?.selfInspectEnabled === false) {
+    return { ok: false, code: 'self-inspect-disabled', error: '设置页已关闭「允许 AI 查看自己的模型窗口」' }
+  }
+  if (view.window?.ready !== true) return { ok: false, code: 'window-not-ready', error: '模型窗口还没准备好' }
+  const id = randomUUID()
+  const timeoutMs = Math.max(1000, Math.min(15000, Number(options.timeoutMs) || 6000))
+  const promise = new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      root.selfCaptureRequests?.delete(id)
+      resolve({ ok: false, code: 'self-capture-timeout', error: `窗口截图 ${timeoutMs}ms 内没有返回` })
+    }, timeoutMs)
+    if (typeof timer?.unref === 'function') timer.unref()
+    root.selfCaptureRequests ??= new Map()
+    root.selfCaptureRequests.set(id, (result) => {
+      clearTimeout(timer)
+      root.selfCaptureRequests.delete(id)
+      resolve(result)
+    })
+  })
+  const sent = view.windows?.send?.({ type: 'screenshot', id })
+  if (sent?.ok === false) {
+    root.selfCaptureRequests.get(id)?.({ ok: false, code: 'self-capture-send-failed', error: sent.error ?? '截图命令没送到窗口' })
+  }
+  return promise
 }
 
 // --- 阶段 4：语音（CosyVoice2 本地 HTTP）-----------------------------------
@@ -4158,6 +4381,8 @@ export function instanceSummary(ctx, state, inst) {
       layout: inst.renderer?.layout ?? null,
       // 动作可用性：{ at, actions:[{id,total,usable,missing}] }（0 轨 = 该模型做不了，设置页置灰）
       capability: inst.renderer?.capability ?? null,
+      // 自己设计动作时的可视化参数表：真实参数名 + 范围 + 默认值
+      params: inst.renderer?.params ?? null,
       // 纹理健康：某张 4096 纹理上传失败时，模型上会出现黑块
       textures: inst.renderer?.textures ?? null,
     },
@@ -4441,7 +4666,7 @@ export function designAction(label, description) {
  * 窗口要显示/播放的预设动作。
  *
  * 内置动作仍留在渲染层和 ANIM_WHITELIST 里，供摸头、生命感和旧调用使用；
- * 但它们按示例模型参数写死，不能作为跨模型菜单项展示。菜单只下发当前模型
+ * 但它们按大肥鱼参数写死，不能作为跨模型菜单项展示。菜单只下发当前模型
  * 可验证的默认动作、模型自带能力，以及用户/AI 的自定义动作。
  */
 export function buildPresets(inst, profile = null) {
@@ -4454,13 +4679,22 @@ export function buildPresets(inst, profile = null) {
     label: custom.label,
     kind: 'custom',
     durationMs: custom.durationMs,
+    repeat: custom.repeat ?? 1,
+    body: custom.body === true,
+    hold: custom.hold === true,
+    desc: custom.desc ?? '',
+    group: custom.group ?? '',
     tracks: custom.tracks,
   }))
   // 0.4.0：按模型能力自动挑的默认动作（与用户自定义动作同构，渲染层一视同仁）
   for (const auto of profile?.autoActions ?? []) {
     // 同 id 自定义动作是 AI/用户给默认动作做的覆盖层；只显示覆盖后的版本。
     if (customIds.has(auto.id)) continue
-    actions.push({ id: auto.id, label: auto.label, kind: 'custom', auto: true, durationMs: auto.durationMs, tracks: auto.tracks })
+    actions.push({
+      id: auto.id, label: auto.label, kind: 'custom', auto: true,
+      durationMs: auto.durationMs, repeat: auto.repeat ?? 1, body: auto.body === true,
+      desc: auto.desc ?? '', group: auto.group ?? '', tracks: auto.tracks,
+    })
   }
   // 0.5.0：从 Exp3/Animation 扫出来的表情、换装、手势（hold=true，再点一次取消）
   for (const cap of profile?.capabilityActions ?? []) {
@@ -4468,7 +4702,7 @@ export function buildPresets(inst, profile = null) {
     actions.push({
       id: cap.id, label: cap.label, kind: 'custom', auto: true, capability: true,
       hold: cap.hold === true, group: cap.group ?? '', desc: cap.desc ?? '',
-      durationMs: cap.durationMs, tracks: cap.tracks,
+      durationMs: cap.durationMs, repeat: cap.repeat ?? 1, body: cap.body === true, tracks: cap.tracks,
     })
   }
   const sequences = presetSequences.map((seq) => ({
@@ -4511,6 +4745,7 @@ export function windowConfigPayload(config, presets = null, life = null) {
     dragInertia: config.dragInertia !== false,
     motionStrength: config.motionStrength,
     autoInteract: config.autoInteract !== false,
+    preserveIndependentHolds: config.preserveIndependentHolds !== false,
     idlePresets: config.idlePresets !== false,
     // 0.13.0：模式与唤醒状态（窗口工具栏按钮要用）
     mode: config.mode === 'auto' || config.mode === 'semi' ? config.mode : 'manual',
@@ -4518,6 +4753,7 @@ export function windowConfigPayload(config, presets = null, life = null) {
     wakeEnabled: config.wakeEnabled === true,
     eventWakeEnabled: config.eventWakeEnabled === true,
     lifeEnabled: config.lifeEnabled !== false,
+    moodTraceEnabled: config.moodTraceEnabled !== false,
     lifeFarewellEnabled: config.lifeFarewellEnabled !== false,
     life: life ?? null,
     wakeBusy: false,
@@ -4664,10 +4900,15 @@ export function applyWindowMessage(state, message) {
         at: new Date().toISOString(),
         count: Number(message.count) || 0,
         params: Array.isArray(message.params) ? message.params.map(String).slice(0, 300) : [],
+        paramMeta: message.paramMeta && typeof message.paramMeta === 'object' ? message.paramMeta : {},
       }
       // 0.4.0：按这只模型真实有的参数挑默认动作（参数集没变不会重复写）
       const owner = state.root ? findInstance(state.root, state.id) : null
-      if (owner) owner.rendererParams = { at: new Date().toISOString(), params: state.renderer.params.params }
+      if (owner) owner.rendererParams = {
+        at: new Date().toISOString(),
+        params: state.renderer.params.params,
+        paramMeta: state.renderer.params.paramMeta,
+      }
       try {
         ensureAutoActions(state, owner ?? state)
       } catch (error) {
@@ -4732,6 +4973,22 @@ export function applyWindowMessage(state, message) {
       if (message.code === 'renderer-crash') state.window.ready = false
     }
     pushRuntimeWarning(state, `窗口报错：${message.error ?? 'unknown'}`)
+    return
+  }
+  if (type === 'screenshot') {
+    const root = state.root ?? state
+    const resolver = root.selfCaptureRequests?.get(message.id)
+    if (resolver) {
+      resolver(message.ok === true
+        ? {
+            ok: true,
+            base64: message.base64,
+            at: message.at ?? new Date().toISOString(),
+            width: message.width ?? null,
+            height: message.height ?? null,
+          }
+        : { ok: false, code: 'self-capture-failed', error: message.error ?? '窗口截图失败' })
+    }
     return
   }
   if (type === 'pin') {
@@ -4816,6 +5073,31 @@ export function applyWindowMessage(state, message) {
   if (type === 'preset-sequence-stop') {
     const owner = state.root ? findInstance(state.root, state.id) : null
     if (owner) stopPresetSequence(state.root, owner)
+    return
+  }
+  if (type === 'pose-save') {
+    const owner = state.root ? findInstance(state.root, state.id) : null
+    if (!owner) return
+    const warnings = []
+    const draft = normalizeCustomActions([message.draft], warnings)[0]
+    if (!draft) {
+      state.windows?.send?.({
+        type: 'pose-save-result',
+        ok: false,
+        error: warnings[0] ?? '姿势草稿不合法',
+      }, owner.id)
+      return
+    }
+    const profile = profileFor(state.root, owner)
+    const existing = Array.isArray(profile?.customActions) ? profile.customActions : []
+    const next = [...existing.filter((item) => item.id !== draft.id), draft]
+    const saved = savePresetsToProfile(state.root, owner, { customActions: next }, state.logger)
+    state.windows?.send?.({
+      type: 'pose-save-result',
+      ok: saved.ok === true,
+      actionId: draft.id,
+      error: saved.ok ? null : (saved.error ?? saved.code ?? '保存失败'),
+    }, owner.id)
     return
   }
   if (type === 'open-settings') {
@@ -5002,7 +5284,7 @@ export function collectSessionsForPicker(ctx, limit = 50, dir = SESSION_PROJCACH
     }
   }
   try {
-    // 目录里不只有会话：还有工作区级缓存文件（非会话记录）也要跳过。
+    // 目录里不只有会话：还有 workspace-cache.json 这类工作区级缓存。
     // 只认带 `session-` 前缀的 UUID 文件——不带前缀的是 subagent 子会话，
     // 硬拼成 session-<uuid> 会列出根本不存在的对话（显示成「无标题」）。
     const isSessionFile = (name) => /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i.test(name)
@@ -5310,7 +5592,7 @@ export function submitChat(ctx, state, log, body) {
     id: `live2d-chat-${randomUUID()}`,
     role: 'user',
     content: [{ type: 'text', text }],
-    source: { kind: 'live2d-chat' },
+    source: { kind: 'live2d-chat', form: 'user-authored', authoredBy: 'user' },
   }
   const before = assistantIdentity(target.session)
   state.chat = {
@@ -5394,7 +5676,7 @@ export const BUILTIN_ACTION_LABELS = {
 const BUILTIN_ACTION_IDS = new Set(ANIM_WHITELIST)
 
 // --- 动作词条库（0.4.0）-------------------------------------------------------
-// 起因：内置 12 个动作写死「示例模型」的参数（PARAM_EXP3~8 等），换到没这些参数的模型上，
+// 起因：内置 12 个动作写死「大肥鱼」的参数（PARAM_EXP3~8 等），换到没这些参数的模型上，
 // 缺轨被静默跳过 → 用户看到「动作做不出来」。改成词条库：每条只声明自己要哪几个逻辑参数，
 // 模型加载后按它的真实参数筛出「所有轨道都落得下」的，挑 10 条写进模型档案当默认动作。
 // pool 决定优先级：core（标准参数，人人有）> special（模型专属参数）> exp（表情贴图参数）。
@@ -5438,9 +5720,54 @@ export const ACTION_LIBRARY = [
     needs: ['mouthOpen'], tracks: [
       { param: 'mouthOpen', keys: [[0, 0], [0.3, 0.7], [0.6, 0.15], [1, 0]] },
     ] },
-  { id: 'lean', label: '身体前倾', desc: '身子往一侧歪一下', pool: 'core', durationMs: 2000,
+  { id: 'lean', label: '身体前倾', desc: '身体明显向一侧倾斜，不再只是轻轻晃', pool: 'core', body: true, durationMs: 2200,
     needs: ['bodyX'], tracks: [
-      { param: 'bodyX', keys: [[0, 0], [0.2, 10], [0.8, 8], [1, 0]] },
+      { param: 'bodyX', keys: [[0, 0], [0.18, -26], [0.7, -22], [1, 0]] },
+    ] },
+  { id: 'body-sway', label: '身体摇摆', desc: '身体左右摆动两轮', pool: 'core', body: true, durationMs: 2600, repeat: 2,
+    needs: ['bodyX', 'headZ'], tracks: [
+      { param: 'bodyX', keys: [[0, 0], [0.22, 32], [0.62, -30], [1, 0]] },
+      { param: 'headZ', keys: [[0, 0], [0.22, 9], [0.62, -9], [1, 0]] },
+    ] },
+  { id: 'body-bounce', label: '身体弹动', desc: '身体有节奏地向两侧弹动', pool: 'core', body: true, durationMs: 2200, repeat: 3,
+    needs: ['bodyX'], tracks: [
+      { param: 'bodyX', keys: [[0, 0], [0.2, 22], [0.55, -18], [1, 0]] },
+    ] },
+  { id: 'shoulder-roll', label: '扭肩膀', desc: '肩膀和上半身一起绕动', pool: 'core', body: true, durationMs: 3200, repeat: 2,
+    needs: ['bodyX', 'bodyZ', 'headZ'], tracks: [
+      { param: 'bodyX', keys: [[0, 0], [0.25, 24], [0.55, -24], [0.8, 18], [1, 0]] },
+      { param: 'bodyZ', keys: [[0, 0], [0.25, 18], [0.55, -16], [0.8, 12], [1, 0]] },
+      { param: 'headZ', keys: [[0, 0], [0.3, -12], [0.65, 12], [1, 0]] },
+    ] },
+  { id: 'wave-big', label: '抬手挥手', desc: '肩、肘、手腕联动抬手挥动；过肩幅度取决于模型骨架范围', pool: 'core', body: true, durationMs: 3200, repeat: 2,
+    needs: ['shoulderR', 'elbowR', 'wristR', 'bodyX', 'headZ'], tracks: [
+      { param: 'shoulderR', keys: [[0, 0], [0.16, -40], [0.8, -38], [1, 0]] },
+      { param: 'elbowR', keys: [[0, 0], [0.16, 38], [0.34, 28], [0.5, 38], [0.68, 28], [0.82, 34], [1, 0]] },
+      { param: 'wristR', keys: [[0, 0], [0.24, -34], [0.36, 34], [0.48, -34], [0.6, 34], [0.72, -26], [1, 0]] },
+      { param: 'bodyX', keys: [[0, 0], [0.2, -20], [0.78, 18], [1, 0]] },
+      { param: 'headZ', keys: [[0, 0], [0.22, 12], [0.78, -9], [1, 0]] },
+    ] },
+  { id: 'kick', label: '踢腿', desc: '腿部明显抬起再放下', pool: 'core', body: true, durationMs: 2200, repeat: 2,
+    needs: ['legR', 'bodyX'], tracks: [
+      { param: 'legR', keys: [[0, 0], [0.28, -38], [0.52, -34], [1, 0]] },
+      { param: 'bodyX', keys: [[0, 0], [0.28, -14], [0.6, 10], [1, 0]] },
+    ] },
+  { id: 'dance-basic', label: '全身舞动', desc: '慢拍重心转换、头部跟随和双臂交替，并尝试叠加表情与衣服变化', pool: 'core', body: true, durationMs: 4800,
+    needs: ['bodyX', 'bodyY', 'bodyZ', 'headX', 'headZ', 'hipX'], tracks: [
+      { param: 'bodyX', keys: [[0, 0], [0.16, -12], [0.36, 16], [0.56, -16], [0.76, 14], [1, 0]] },
+      { param: 'bodyY', keys: [[0, 0], [0.22, 6], [0.52, -4], [0.8, 5], [1, 0]] },
+      { param: 'bodyZ', keys: [[0, 0], [0.16, -10], [0.36, 14], [0.56, -14], [0.76, 10], [1, 0]] },
+      { param: 'hipX', keys: [[0, 0], [0.16, 10], [0.36, -12], [0.56, 14], [0.76, -10], [1, 0]] },
+      { param: 'headX', keys: [[0, 0], [0.16, 8], [0.36, -10], [0.56, 10], [0.76, -6], [1, 0]] },
+      { param: 'headZ', keys: [[0, 0], [0.16, 9], [0.36, -11], [0.56, 11], [0.76, -8], [1, 0]] },
+      { param: 'shoulderL', keys: [[0, 0], [0.16, 10], [0.36, -16], [0.56, 12], [0.76, -18], [1, 0]] },
+      { param: 'elbowL', keys: [[0, 0], [0.16, -12], [0.36, 16], [0.56, -10], [0.76, 20], [1, 0]] },
+      { param: 'shoulderR', keys: [[0, 0], [0.16, -18], [0.36, 10], [0.56, -14], [0.76, 12], [1, 0]] },
+      { param: 'elbowR', keys: [[0, 0], [0.16, 16], [0.36, -12], [0.56, 14], [0.76, -10], [1, 0]] },
+      { param: 'eyeSmile', keys: [[0, 0], [0.3, 0.8], [0.7, 0.9], [1, 0]] },
+      { param: 'mouthForm', keys: [[0, 0], [0.3, 0.75], [0.7, 0.85], [1, 0]] },
+      { param: 'blush', keys: [[0, 0], [0.25, 1], [0.75, 1], [1, 0]] },
+      { param: 'Clothes1', keys: [[0, 0], [0.3, 1], [0.7, 1], [0.82, 0], [1, 0]] },
     ] },
   { id: 'surprise-eyes', label: '瞪大眼', desc: '眼睛睁大、嘴张开', pool: 'core', durationMs: 1600,
     needs: ['eyeOpenL', 'eyeOpenR', 'mouthOpen'], tracks: [
@@ -5479,7 +5806,7 @@ export const ACTION_LIBRARY = [
       { param: 'pupilX', keys: [[0, 0], [0.25, 0.8], [0.6, -0.8], [1, 0]] },
       { param: 'pupilY', keys: [[0, 0], [0.25, 0.3], [0.6, -0.3], [1, 0]] },
     ] },
-  // 表情贴图池：靠模型的 EXP* 参数（示例模型这类模型有，很多模型没有 → 会自动跳过）
+  // 表情贴图池：靠模型的 EXP* 参数（大肥鱼这类模型有，很多模型没有 → 会自动跳过）
   { id: 'blush', label: '脸红', desc: '腮红贴图 + 歪头', pool: 'exp', durationMs: 3200,
     needs: ['blush'], tracks: [
       { param: 'blush', keys: [[0, 0], [0.12, 1], [0.86, 1], [1, 0]] },
@@ -5516,6 +5843,21 @@ const LIBRARY_PARAM_ALIASES = {
   headZ: ['ParamAngleZ'],
   bodyX: ['ParamBodyAngleX'],
   bodyY: ['ParamBodyAngleY'],
+  bodyZ: ['ParamBodyAngleZ'],
+  shoulderL: ['LArm', 'ParamArmLA', 'ParamArmL', 'Param_Arm_L', 'Param_arm_L1', 'ShoulderY', 'ShoulderZ', 'ShoulderX'],
+  armL: ['LArm', 'ParamArmLA', 'ParamArmL', 'Param_Arm_L', 'Param_arm_L1'],
+  elbowL: ['LForearm', 'ParamArmLB', 'Param_arm_L2', 'ParamForearmL'],
+  wristL: ['LWrist', 'ParamArmLC', 'Param_arm_L3', 'ParamWristL'],
+  handL: ['LHand', 'LHand2', 'ParamHandL', 'ParamHandLA', 'Param_hand_L1', 'Param_hand_L2', 'Param_hand_L3', 'Param_hand_L4'],
+  shoulderR: ['RArm', 'ParamArmRA', 'ParamArmR', 'Param_Arm_R', 'Param_arm_R1', 'ShoulderY', 'ShoulderZ', 'ShoulderX'],
+  armR: ['RArm', 'ParamArmRA', 'ParamArmR', 'Param_Arm_R', 'Param_arm_R1'],
+  elbowR: ['RForearm', 'ParamArmRB', 'Param_arm_R2', 'ParamForearmR'],
+  wristR: ['RWrist', 'ParamArmRC', 'Param_arm_R3', 'ParamWristR'],
+  handR: ['RHand', 'RHand2', 'ParamHandR', 'ParamHandRA', 'Param_hand_R1', 'Param_hand_R2', 'Param_hand_R3', 'Param_hand_R4'],
+  legL: ['ParamLegL', 'ParamLegLA', 'Param_leg_L1', 'Param_leg_L2'],
+  legR: ['ParamLegR', 'ParamLegRA', 'Param_leg_R1', 'Param_leg_R2'],
+  hipX: ['HipAngleX', 'ParamHipAngleX', 'ParamHipAngleXq'],
+  hipZ: ['ParamHipAngleZ', 'HipAngleZ', 'HipZ1', 'HipZ2'],
   eyeOpenL: ['ParamEyeLOpen'],
   eyeOpenR: ['ParamEyeROpen'],
   eyeBallX: ['ParamEyeBallX'],
@@ -5532,7 +5874,7 @@ const LIBRARY_PARAM_ALIASES = {
   pupilY: ['PupilY'],
   blush: ['PARAM_EXP4'],
   shockEye: ['PARAM_EXP5'],
-  // 示例模型实测：EXP3 = X 眼、EXP6 = 脸黑、EXP7 = 流口水（早期动作实现已验证过）
+  // 大肥鱼实测：EXP3 = X 眼、EXP6 = 脸黑、EXP7 = 流口水（早期动作实现已验证过）
   xeyes: ['PARAM_EXP3'],
   drool: ['PARAM_EXP7'],
   darkFace: ['PARAM_EXP6'],
@@ -5548,18 +5890,20 @@ function resolveLibraryParam(name, paramSet) {
   return null
 }
 
-/** 模型参数集指纹：参数集合变了（换模型/模型资源更新）就该重新挑默认动作。 */
+export const ACTION_LIBRARY_VERSION = 'body-5'
+
+/** 模型参数集指纹：参数集合或动作库版本变了（换模型/资源更新/升级词条库）就该重新挑默认动作。 */
 export function libraryParamsHash(params) {
   const list = (Array.isArray(params) ? params : []).map(String).filter(Boolean).sort()
   if (!list.length) return ''
-  return createHash('sha1').update(list.join('|')).digest('hex').slice(0, 12)
+  return createHash('sha1').update(`${ACTION_LIBRARY_VERSION}|${list.join('|')}`).digest('hex').slice(0, 12)
 }
 
 /**
  * 按模型真实参数挑默认动作：core 先占 7 个（通用、一定明显），再从 special/exp 补 3 个。
  * 只有「needs 全部解析得到」的词条才会入选——缺一轨就不选，避免又出现「做一半」的动作。
  */
-export function pickDefaultActions(params, limit = 10) {
+export function pickDefaultActions(params, limit = 10, paramMeta = {}) {
   const set = new Set((Array.isArray(params) ? params : []).map(String))
   const usable = (entry) => entry.needs.every((name) => resolveLibraryParam(name, set))
   const core = ACTION_LIBRARY.filter((entry) => entry.pool === 'core' && usable(entry))
@@ -5574,16 +5918,42 @@ export function pickDefaultActions(params, limit = 10) {
       desc: entry.desc ?? '',
       durationMs: entry.durationMs,
       repeat: entry.repeat ?? 1,
+      body: entry.body === true,
       // tracks 落成这只模型真实有的参数名：渲染层不用再猜，换模型时靠 hash 重挑
-      tracks: entry.tracks.map((track) => ({
-        param: resolveLibraryParam(track.param, set) ?? track.param,
-        logical: track.param,
-        keys: track.keys.map((pair) => [pair[0], pair[1]]),
-      })),
+      tracks: entry.tracks.map((track) => {
+        const actual = resolveLibraryParam(track.param, set) ?? track.param
+        const meta = paramMeta?.[actual] ?? null
+        const span = meta ? Math.abs(Number(meta.max) - Number(meta.min)) : 0
+        const scaleToRatio = /^(?:head|body|hip|shoulder|elbow|wrist|arm|hand|leg)/.test(track.param)
+          && span > 0 && span <= 2
+        return {
+          param: actual,
+          logical: track.param,
+          keys: track.keys.map((pair) => {
+            const value = pair[1]
+            if (!scaleToRatio || typeof value !== 'number') return [pair[0], value]
+            const limit = Math.max(Math.abs(Number(meta.min) || 0), Math.abs(Number(meta.max) || 0), 1)
+            return [pair[0], (value / 40) * limit]
+          }),
+        }
+      }),
     })
   }
-  for (const entry of core.slice(0, 7)) take(entry)
-  // 剩余名额：先补「表情类」（示例模型这类有 PARAM_EXP* 的模型），再补其它专属动作
+  // 默认动作至少保留三个身体动作；有手臂/腿参数的模型优先放入挥手和踢腿。
+  const bodyCore = core.filter((item) => item.body === true)
+  const limbBody = bodyCore.filter((item) => item.needs.some((name) => /^(?:shoulder|elbow|wrist|arm|hand|leg|hip)/.test(name)))
+  const generalBody = bodyCore.filter((item) => !limbBody.includes(item))
+  // 保留一个稳定的“跳个舞”入口：优先选过肩挥手和全身舞动，再用其它身体动作补足。
+  const preferredBody = [...new Set([
+    ...bodyCore.filter((item) => item.id === 'wave-big'),
+    ...bodyCore.filter((item) => item.id === 'dance-basic'),
+    ...limbBody,
+    ...generalBody,
+  ])]
+  for (const entry of preferredBody.slice(0, 3)) take(entry)
+  // 留 1 个名额给模型专属表情，避免身体动作增加后把 PARAM_EXP* 全部挤掉。
+  for (const entry of core.slice(0, 6)) take(entry)
+  // 剩余名额：先补「表情类」（大肥鱼这类有 PARAM_EXP* 的模型），再补其它专属动作
   const extraOrdered = [
     ...extra.filter((entry) => entry.pool === 'exp'),
     ...extra.filter((entry) => entry.pool !== 'exp'),
@@ -5604,6 +5974,87 @@ export const ANIM_ALIASES = { blush: 'shy', embarrassed: 'shy', stare: 'xx' }
 // ---------------------------------------------------------------------------
 const CAP_EXPR_DIRS = ['Exp3', 'Exp2', 'Exp', 'Expression', 'expressions']
 const CAP_MOTION_DIRS = ['Animation', 'Motion', 'motions', 'animations']
+
+function bezierPoint(p0, p1, p2, p3, t) {
+  const u = 1 - t
+  return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3
+}
+
+/** 把 Cubism motion3 参数曲线采样成插件可直接播放的关键帧。 */
+export function parseMotion3Tracks(json, maxKeys = KEY_LIMIT) {
+  const tracks = []
+  for (const curve of Array.isArray(json?.Curves) ? json.Curves : []) {
+    if (curve?.Target !== 'Parameter' || !curve?.Id || !Array.isArray(curve.Segments)) continue
+    const src = curve.Segments
+    if (src.length < 2) continue
+    let cursor = 2
+    let previousTime = Number(src[0]) || 0
+    let previousValue = Number(src[1]) || 0
+    let keys = [[previousTime, previousValue]]
+    while (cursor < src.length) {
+      const type = Number(src[cursor++])
+      if (type === 1) {
+        if (cursor + 5 >= src.length) break
+        const c1t = Number(src[cursor++]) || 0
+        const c1v = Number(src[cursor++]) || 0
+        const c2t = Number(src[cursor++]) || 0
+        const c2v = Number(src[cursor++]) || 0
+        const endT = Number(src[cursor++]) || previousTime
+        const endV = Number(src[cursor++]) || 0
+        for (let step = 1; step <= 4; step += 1) {
+          const t = step / 4
+          keys.push([
+            bezierPoint(previousTime, c1t, c2t, endT, t),
+            bezierPoint(previousValue, c1v, c2v, endV, t),
+          ])
+        }
+        previousTime = endT
+        previousValue = endV
+      } else {
+        if (cursor + 1 >= src.length) break
+        const endT = Number(src[cursor++]) || previousTime
+        const endV = Number(src[cursor++]) || 0
+        if (type === 2 && endT > previousTime) keys.push([Math.max(previousTime, endT - 0.001), previousValue])
+        keys.push([endT, endV])
+        previousTime = endT
+        previousValue = endV
+      }
+    }
+    keys = keys
+      .filter((pair) => pair.every(Number.isFinite))
+      .sort((a, b) => a[0] - b[0])
+      .filter((pair, index, list) => index === 0 || pair[0] > list[index - 1][0] + 0.0001)
+    if (keys.length < 2) continue
+    if (keys.length > maxKeys) {
+      const sampled = []
+      for (let index = 0; index < maxKeys; index += 1) {
+        sampled.push(keys[Math.round(index * (keys.length - 1) / (maxKeys - 1))])
+      }
+      keys = sampled
+    }
+    const durationSec = Math.max(
+      Number(json?.Meta?.Duration) || 0,
+      Number(keys.at(-1)?.[0]) || 0,
+    )
+    if (durationSec > 0) {
+      keys = keys.map(([time, value]) => [
+        Math.min(1, Math.max(0, time / durationSec)),
+        value,
+      ])
+    }
+    tracks.push({ param: String(curve.Id), keys })
+  }
+  return tracks
+}
+
+function motionGestureLabel(label, tracks) {
+  const movement = tracks.find((track) => /^Movement\d+$/i.test(track.param))
+  const names = { Movement1: '狗尾草', Movement2: '抚胸', Movement3: '竖食指' }
+  if (!movement) return label
+  const end = Number(movement.keys.at(-1)?.[1])
+  const base = names[movement.param] || label
+  return end > 0.5 ? base : `${base}（恢复）`
+}
 
 function capabilityGroupOf(param) {
   const p = String(param ?? '')
@@ -5682,10 +6133,21 @@ export function scanModelCapability(modelPath) {
     try { files = readdirSync(path.join(root, dir)) } catch { continue }
     for (const file of files.sort()) {
       if (!/\.motion3\.json$/i.test(file)) continue
+      let json = null
+      try { json = JSON.parse(readFileSync(path.join(root, dir, file), 'utf8')) } catch { continue }
+      const tracks = parseMotion3Tracks(json)
+      const durationMs = Math.round((Number(json?.Meta?.Duration) || 0) * 1000)
+      // IDLE/脱捕等长循环不适合塞进「点一次触发的模型手势」，也会超过轨道上限。
+      if (!tracks.length || tracks.length > TRACK_LIMIT || durationMs <= 0 || durationMs > 10_000) continue
+      const rawLabel = file.replace(/\.motion3\.json$/i, '')
       out.motions.push({
-        label: file.replace(/\.motion3\.json$/i, ''),
+        label: motionGestureLabel(rawLabel, tracks).slice(0, 32),
+        rawLabel,
         file: `${dir}/${file}`,
         registered: registered.motions.has(`${dir}/${file}`),
+        durationMs,
+        group: capabilityGroupOf(tracks[0].param),
+        tracks,
       })
     }
   }
@@ -5697,11 +6159,11 @@ export function scanModelCapability(modelPath) {
  * 把能力里的表情/换装翻成动作（hold=true：设完保持，再点一次取消）。
  * 只有「所有参数都在这只模型的运行时参数集里」的条目才生成，避免半套。
  */
-export function pickCapabilityActions(capability, params, limit = 24) {
+export function pickCapabilityActions(capability, params, limit = 36) {
   const set = new Set((Array.isArray(params) ? params : []).map(String))
-  if (!set.size || !capability?.expressions?.length) return []
+  if (!set.size) return []
   const out = []
-  for (const expr of capability.expressions) {
+  for (const expr of capability?.expressions ?? []) {
     if (out.length >= limit) break
     if (!expr.params.length) continue
     if (!expr.params.every((item) => set.has(item.param))) continue
@@ -5716,6 +6178,20 @@ export function pickCapabilityActions(capability, params, limit = 24) {
         param: item.param,
         keys: [[0, 'current'], [1, item.value]],
       })),
+    })
+  }
+  for (const motion of capability?.motions ?? []) {
+    if (out.length >= limit) break
+    const tracks = Array.isArray(motion.tracks) ? motion.tracks : []
+    if (!tracks.length || !tracks.every((track) => set.has(track.param))) continue
+    out.push({
+      id: `motion-${createHash('sha1').update(motion.file || motion.rawLabel || motion.label).digest('hex').slice(0, 10)}`,
+      label: motion.label,
+      desc: `模型内置动画${motion.registered ? '' : '（model3 未登记，已直接解析）'}（再点一次取消）`,
+      group: motion.group || 'gesture',
+      hold: true,
+      durationMs: Math.min(10_000, Math.max(200, Number(motion.durationMs) || 1000)),
+      tracks: tracks.map((track) => ({ param: track.param, keys: track.keys })),
     })
   }
   return out
@@ -5768,10 +6244,14 @@ export function handleAnim(state, log, body, source = 'ui') {
     timeout: false,
     ackedAt: null,
   }
+  const performance = performanceForAction(state, source)
   // 动作本身有 1.4~1.8s，超时兜底不能比动作还短（否则刚歪头就被 idle 拉回）
   // 兜底要长于最长动作（tilt/nod 现在 2.0~2.2s），否则刚歪上头就被拉回 idle
-  const timeoutMs = Math.max(state.config.animTimeoutMs, 4000)
-  const sent = state.windows.send?.({ type: 'anim', action, timeoutMs })
+  const perfDuration = custom?.durationMs
+    ? Math.ceil(custom.durationMs / Math.max(0.65, Number(performance?.speed) || 1))
+    : 0
+  const timeoutMs = Math.max(state.config.animTimeoutMs, 4000, perfDuration + 700)
+  const sent = state.windows.send?.({ type: 'anim', action, timeoutMs, performance })
 
   // 执行超时：窗口没回 anim-done 就补一条 idle，别让模型卡在半个动作里。
   // 注意 log 可能是对象（safeLogger 返回 {info,warn,error}），直接 log(...) 会抛 TypeError，
@@ -5796,6 +6276,7 @@ export function handleAnim(state, log, body, source = 'ui') {
       sent,
       timeoutMs,
       cooldownMs,
+      performance,
       allowed: ANIM_WHITELIST,
       lastAnimAt: new Date(now).toISOString(),
     },
@@ -6148,6 +6629,7 @@ export function buildWakeMessage(inst, info, source, now = Date.now(), reason = 
   lines.push('请先根据窗口标题和截图判断用户当前在做什么，再把观察转成陪伴反应；不要只复述画面，也不要套固定模板。')
   lines.push('场景参考：游戏时像在旁边陪着一样应援、加油、为精彩操作欢呼、失误时安慰；工作/学习/写代码时轻声鼓励并减少打断；看视频或阅读时像一起看一样回应。')
   lines.push('游戏场景不要居高临下地指挥或连续教用户怎么玩，只用简短自然的话应援；如果信息不足，不要硬猜具体游戏结果。')
+  lines.push('主动动作不要总停留在眨眼、歪头或只动脸；场景合适时，每 2~3 次回应至少安排一次身体动作，例如身体摇摆、扭肩膀、挥手、踢腿或全身舞动。')
   lines.push('主动跟我说一两句话，并选择与当前场景相符的表情/动作。')
   // 告诉模型它能用哪些工具（不同模式不一样），避免它乱试
   const canAct = canControl(inst, 'anim', { source })
@@ -6158,7 +6640,11 @@ export function buildWakeMessage(inst, info, source, now = Date.now(), reason = 
     lines.push('- 现成动作不贴切时，自己设计一个再立刻播：')
     lines.push('  live2d_preset {op:"define", id:"proud", label:"得意", durationMs:1600, tracks:[{param:"headZ", keys:[[0,0],[0.3,12],[0.85,10],[1,0]]},{param:"mouthForm", keys:[[0,0],[0.4,1],[1,0]]}]}')
     lines.push('  live2d_preset {op:"play", action:"proud"}')
-    lines.push('  param 可用逻辑名 headX/headY/headZ/eyeOpenL/eyeOpenR/eyeBallX/eyeBallY/mouthOpen/mouthForm/bodyX，也可写真实参数名；模型没有的参数会自动跳过。')
+    lines.push('  身体参数可用逻辑名 bodyX/bodyY/bodyZ（躯干倾斜和扭转）、hipX/hipZ（髋部）、shoulderL/shoulderR（肩/上臂）、elbowL/elbowR（手肘/前臂）、wristL/wristR（手腕）、handL/handR、legL/legR、headX/headY/headZ。')
+    lines.push('  挥手必须肩、肘、腕联动：只抬 upper arm 会像轻轻抬手；要同时抬肩、弯肘并摆腕，幅度通常需要推到参数范围的 70%~100%。')
+    lines.push('  幅度参考：头/身体角度常写 ±18~40，挥手/踢腿常写 ±30~40，跳舞优先用大幅躯干与髋部摆动；不要只写 3~12。正式设计前先调用 live2d_params 查看真实参数和范围。')
+    lines.push('  半自动模式按你设计的动作原样播放；自动模式会再根据精力与心情自动调整速度和幅度，所以自动模式设计时也要保留完整的动作幅度。')
+    lines.push('- 如果设置开启了“允许 AI 查看自己的模型窗口”，做完挥手、跳舞等复杂动作后调用 live2d_self_view 并等待 300~1200ms，再用 read_image 查看返回路径；动作不明显时自己调整参数再重试。')
     lines.push('- 一次只做一个动作，等它跑完再说话/做下一个，别连刷。')
   } else {
     lines.push('当前模式下不要做动作，只回话。')
@@ -6318,19 +6804,34 @@ export async function wakeUp(root, inst, source = 'wake-timer', log = null, opts
     const baseline = assistantIdentity(target.session)
     const memories = memoryPromptLines(root, inst, `${info?.title ?? ''} ${opts.reason?.detail ?? ''}`.trim(), 4)
     const text = buildWakeMessage(inst, info, source, now, opts.reason ?? null, memories)
+    const autonomousText = `【自主唤醒 · 非用户消息】
+本条由插件 dsh-live2d 生成，本轮没有真实用户发言。
+不要把实时画面、记忆或自己的想法写成“主人说/你说/主人刚才说”。
+如果当前消息、带时间戳记录和日记/记忆三处都核不中来源，不要删除原句；降级写成“人家自己的想法：……（这句无出处）”。
+
+${text}`
     const message = {
       id: `live2d-wake-${randomUUID()}`,
       role: 'user',
-      content: [{ type: 'text', text }],
-      source: { kind: 'live2d-wake' },
+      content: [{ type: 'text', text: autonomousText }],
+      source: {
+        kind: 'plugin:dsh-live2d',
+        form: 'autonomous-wake',
+        summary: `Live2D 自主唤醒：${source}`,
+        trigger: source,
+      },
     }
 
     // 让这一轮的回复在 idle 时按唤醒来源决定推不推气泡
     if (inst.chat) inst.chat.replySource = source
 
     inst.wake.state = 'injecting'
-    // followup 必须接住 rejection：未处理的 rejection 会让 DSH 宿主进程退出
-    Promise.resolve(agent.agent.followup(message)).catch((error) => {
+    // 自主唤醒优先走 steer，避免冒充普通用户消息；旧宿主才回退 followup。
+    const wakeDelivery = typeof agent.agent.steer === 'function'
+      ? agent.agent.steer(message)
+      : agent.agent.followup(message)
+    // rejection 必须接住：未处理的 rejection 会让 DSH 宿主进程退出
+    Promise.resolve(wakeDelivery).catch((error) => {
       logged(log, `live2d: 唤醒消息被会话拒绝：${errorText(error)}`)
     })
 
@@ -6427,7 +6928,12 @@ export function markUserActivity(state, sessionId = null, source = 'activity', n
     const bound = String(inst.config?.sessionId ?? '')
     if (sessionId && bound !== String(sessionId)) continue
     inst.life.lastUserActivityAt = now
-    inst.life.mood = Math.min(1, inst.life.mood + 0.08)
+    const moodReason = source === 'tap'
+      ? '你摸了摸我，我很开心'
+      : source === 'wake-button'
+        ? '你主动叫了我，心情变好'
+        : '和你聊天让我心情变好'
+    recordMoodChange(inst.life, 0.08, moodReason, source || 'user', now, inst.config)
     inst.life.boredom = Math.max(0, inst.life.boredom - 0.18)
     inst.life.closeness = Math.min(1, inst.life.closeness + 0.005)
     inst.life.proactiveSinceUser = 0
@@ -6450,7 +6956,7 @@ export function noteAgentLife(state, status, sessionId = null, now = Date.now())
       inst.life.energy = Math.max(0, inst.life.energy - 0.01)
     } else if (status === 'idle') {
       inst.life.lastAgentFinishAt = now
-      inst.life.mood = Math.min(1, inst.life.mood + 0.03)
+      recordMoodChange(inst.life, 0.03, '刚陪你完成了一轮对话', 'agent-finished', now, inst.config)
     }
   }
 }
@@ -6807,7 +7313,7 @@ export function handlePresetTap(state, inst, zone, log = null, gesture = 'tap') 
  * 右键菜单里点一个动作：立刻播放。
  * 这是「用户在自己窗口里点」，不是 AI 主动控制 —— 不守模式守卫，也不占 anim 冷却。
  */
-export function playPreset(root, inst, action, log = null) {
+export function playPreset(root, inst, action, log = null, options = {}) {
   if (!inst) return { ok: false, code: 'no-instance' }
   const requested = String(action ?? '').trim().toLowerCase()
   const normalized = ANIM_ALIASES[requested] || requested
@@ -6825,9 +7331,10 @@ export function playPreset(root, inst, action, log = null) {
     }
   }
   const timeoutMs = Math.max(inst.config?.animTimeoutMs ?? 2000, custom?.durationMs ?? 0, 4000)
+  const performance = performanceForAction(inst, options.source ?? 'ui')
   let sent = null
   try {
-    sent = instanceView(root, inst).windows.send({ type: 'anim', action: normalized, timeoutMs })
+    sent = instanceView(root, inst).windows.send({ type: 'anim', action: normalized, timeoutMs, performance })
   } catch (error) {
     logged(log, `live2d: 预设动作播放失败（${inst.id}）：${errorText(error)}`)
   }
@@ -6838,7 +7345,7 @@ export function playPreset(root, inst, action, log = null) {
     count: (inst.anim?.count ?? 0) + 1,
     lastPresetAt: Date.now(),
   }
-  return { ok: sent?.ok !== false, action: normalized, sent }
+  return { ok: sent?.ok !== false, action: normalized, sent, performance }
 }
 
 function pushPresetsToWindow(root, inst) {
@@ -6904,7 +7411,12 @@ export function startPresetSequence(root, inst, sequenceId, log = null, options 
     const action = seq.steps[run.index % seq.steps.length]
     run.index += 1
     try {
-      instanceView(root, inst).windows.send({ type: 'anim', action, timeoutMs: 4000 })
+      instanceView(root, inst).windows.send({
+        type: 'anim',
+        action,
+        timeoutMs: 4000,
+        performance: performanceForAction(inst, options.source ?? 'ui'),
+      })
     } catch (error) {
       logged(log, `live2d: 预设循环下发失败（${inst.id}）：${errorText(error)}`)
     }
@@ -6961,7 +7473,16 @@ export function startPresetLoop(state, log, registerCleanup = () => {}) {
         continue
       }
       const tired = will?.state === 'tired' || (inst.config?.audienceAwareEnabled !== false && inst.life?.audience === 'ambient')
-      const action = tired ? 'blink' : ['blink', 'tilt', 'nod'][Math.floor(Math.random() * 3)]
+      const bodyActions = (profileFor(state, inst)?.autoActions ?? [])
+        .filter((item) => item.body === true)
+        .map((item) => item.id)
+      const mood = Number(inst.life?.mood) || 0
+      const bodyChance = mood > 0.2 ? 0.55 : mood < -0.2 ? 0.25 : 0.42
+      const action = tired
+        ? 'blink'
+        : bodyActions.length && Math.random() < bodyChance
+          ? bodyActions[Math.floor(Math.random() * bodyActions.length)]
+          : ['blink', 'tilt', 'nod'][Math.floor(Math.random() * 3)]
       inst.preset = {
         ...preset,
         idleAt: now,
@@ -7228,6 +7749,34 @@ function registerRoutes(ctx, state, log, eventLog, windows) {
             return
           }
           const op = String(body.op || 'play')
+          if (op === 'editor-open') {
+            const profile = profileFor(state, owner)
+            const actionId = typeof body.actionId === 'string' ? body.actionId.trim() : ''
+            const action = actionId
+              ? buildPresets(owner, profile).actions.find((item) => item.id === actionId) ?? null
+              : null
+            if (actionId && !action) {
+              jsonResponse(res, 404, {
+                ok: false,
+                instanceId: owner.id,
+                error: `当前模型档案没有可编辑动作「${actionId}」`,
+              })
+              return
+            }
+            const sent = instanceView(state, owner).windows?.send?.({
+              type: 'pose-editor-open',
+              profileId: profile?.id ?? null,
+              action,
+            })
+            jsonResponse(res, sent?.ok === false ? 409 : 200, {
+              ok: sent?.ok !== false,
+              instanceId: owner.id,
+              actionId: action?.id ?? null,
+              sent,
+              error: sent?.ok === false ? '模型窗口还没准备好，先打开模型窗口再试' : null,
+            })
+            return
+          }
           if (op === 'play') {
             const result = playPreset(state, owner, body.action, log)
             jsonResponse(res, result.ok ? 200 : 400, { ...result, instanceId: owner.id })
@@ -7882,6 +8431,12 @@ export function createLive2dTools(state, log) {
         modelScalePct: inst.config?.modelScalePct ?? 100,
         bubblePx: inst.renderer?.layout?.bubblePx ?? null,
         bubbleFixedSize: inst.config?.bubbleFixedSize === true,
+        controls: {
+          manualToolsEnabled: inst.config?.manualToolsEnabled === true,
+          preserveIndependentHolds: inst.config?.preserveIndependentHolds !== false,
+          aiMoveEnabled: inst.config?.aiMoveEnabled === true,
+          selfInspectEnabled: inst.config?.selfInspectEnabled !== false,
+        },
         screen: inst.screen?.watch ?? null,
         life: inst.life
           ? {
@@ -7890,6 +8445,9 @@ export function createLive2dTools(state, log) {
               willingness: inst.life.willingness,
               energy: Math.round(Number(inst.life.energy) * 100) / 100,
               mood: Math.round(Number(inst.life.mood) * 100) / 100,
+              moodDelta: Math.round(Number(inst.life.lastMoodDelta) * 100) / 100,
+              moodReason: inst.life.lastMoodReason || '',
+              moodEvents: (inst.life.moodEvents ?? []).slice(-5),
               boredom: Math.round(Number(inst.life.boredom) * 100) / 100,
               lastEvent: inst.life.lastEvent,
               peerAffinity: Math.round(Number(inst.life.peerAffinity) * 100) / 100,
@@ -7974,7 +8532,7 @@ export function createLive2dTools(state, log) {
       properties: {
         instanceId: { type: 'string', description: '可选，指定实例' },
         lookAt: { type: 'string', enum: ['cursor', 'user', 'away', 'none'], description: '看向鼠标、看向用户、看向别处或取消强制视线' },
-        anim: { type: 'string', description: `动作 id：${ANIM_WHITELIST.join(' | ')}，也可用当前实例的自定义动作` },
+        anim: { type: 'string', description: `动作 id：${ANIM_WHITELIST.join(' | ')}，也可用当前实例的默认动作或自定义动作。挥手、踢腿、跳舞优先使用幅度完整的动作（自定义动作先查 live2d_params）` },
         text: { type: 'string', description: '气泡文本；留空则只做视线/动作' },
         delayMs: { type: 'number', description: '动作开始后延迟多久显示气泡，0~3000ms，默认 350ms' },
       },
@@ -8008,7 +8566,7 @@ export function createLive2dTools(state, log) {
 
       let animation = null
       if (anim) {
-        const result = handleAnim(view, log, { action: anim })
+        const result = handleAnim(view, log, { action: anim }, 'tool')
         animation = result.payload ?? { status: result.status }
         if (result.status !== 200) {
           return fail(animation.code ?? 'anim-failed', animation.error ?? `动作失败（${result.status}）`, { instanceId: inst.id, animation, look })
@@ -8088,7 +8646,7 @@ export function createLive2dTools(state, log) {
 
   const toolWindow = {
     name: 'live2d_window',
-    description: '管理 Live2D 桌宠窗口：打开/重载；AI 自动模式下还能移动、改大小、按比例缩放、复位，以及安全地坐到任务栏、靠屏幕边缘或短时跟随鼠标。（AI 不能关闭窗口。）',
+    description: '管理 Live2D 桌宠窗口：打开/重载；AI 自动模式，或手动模式开启“允许对话里的工具控制模型”后，还能在用户对话请求中移动、改大小、缩放、复位以及安全坐到任务栏或边缘。（AI 不能关闭窗口。）',
     parameters: {
       type: 'object',
       properties: {
@@ -8114,15 +8672,15 @@ export function createLive2dTools(state, log) {
       const lifecycle = action === 'open' || action === 'reload'
       // 生命周期操作：auto 仍然禁止；移动/缩放：只有手动 + 显式开启 aiMoveEnabled
       if (lifecycle) {
-        if (target.inst.config?.mode === 'auto') {
+        if (target.inst.config?.mode === 'auto' && target.inst.config?.manualToolsEnabled !== true) {
           const denied = modeForbidden(target.inst, 'window')
           return fail(denied.code, denied.error, { instanceId: target.inst.id, mode: 'auto' })
         }
       } else if (!canControl(target.inst, 'window', { source: 'tool' })) {
         const aiMove = target.inst.config?.aiMoveEnabled === true
-        const why = target.inst.config?.mode !== 'manual'
-          ? '移动/缩放窗口只在「AI 手动」模式可用'
-          : '需要先在设置页打开「允许 AI 移动/缩放窗口」'
+        const why = !aiMove
+          ? '需要先在设置页打开「交给 AI 移动窗口」'
+          : '手动模式下还需要打开「允许对话里的工具控制模型」'
         return fail('window-forbidden', why, { instanceId: target.inst.id, mode: target.inst.config?.mode, aiMoveEnabled: aiMove })
       }
       try {
@@ -8254,8 +8812,9 @@ export function createLive2dTools(state, log) {
     name: 'live2d_preset',
     description:
       '管理预设动作：列出当前实例的动作/循环、播放某个动作、设计一个新的自定义动作、删除自定义动作、设置循环序列、启停循环。' +
-      '自定义动作只描述「参数 → 关键帧」，参数可写逻辑名（headX/headY/headZ/eyeOpenL/eyeOpenR/mouthOpen/mouthForm/eyeBallX/eyeBallY/bodyX）' +
+      '自定义动作只描述「参数 → 关键帧」，参数可写逻辑名（headX/headY/headZ/bodyX/bodyY/bodyZ/hipX/hipZ/shoulderL/shoulderR/elbowL/elbowR/wristL/wristR/handL/handR/legL/legR/eyeOpenL/eyeOpenR/mouthOpen/mouthForm/eyeBallX/eyeBallY）' +
       '或模型真实参数名；换模型时缺的参数会被自动跳过，不必改代码。' +
+      '挥手必须肩、肘、腕三段联动，不能只抬上臂；踢腿、扭肩和跳舞要使用明显幅度。先调用 live2d_params 查真实参数与范围。' +
       '没有合适的现成动作时，应该自己 define 一个新动作（先 list 看现有），再 play 播放，而不是硬套不贴切的预设。',
     parameters: {
       type: 'object',
@@ -8273,7 +8832,7 @@ export function createLive2dTools(state, log) {
         durationMs: { type: 'number', description: '自定义动作时长（200~10000ms，默认 1000）' },
         tracks: {
           type: 'array',
-          description: '自定义动作轨道：[{param, keys:[[0,0],[0.5,10],[1,0]]}]，最多 8 条轨道×12 个关键帧',
+          description: '自定义动作轨道：[{param, keys:[[0,0],[0.5,10],[1,0]]}]，最多 20 条轨道×32 个关键帧',
           items: {
             type: 'object',
             properties: {
@@ -8309,7 +8868,7 @@ export function createLive2dTools(state, log) {
             instanceId: inst.id,
             profileId: profile?.id ?? null,
             profileLabel: profile?.label ?? null,
-            // 内置动作仍可被内部事件/AI 调用，但菜单已不再按示例模型皮套展示。
+            // 内置动作仍可被内部事件/AI 调用，但菜单已不再按大肥鱼皮套展示。
             builtin: ANIM_WHITELIST.map((id) => ({ id, label: BUILTIN_ACTION_LABELS[id] ?? id })),
             defaultActions: (profile?.autoActions ?? [])
               .filter((item) => !customIds.has(item.id))
@@ -8328,7 +8887,7 @@ export function createLive2dTools(state, log) {
       if (op === 'play') {
         // 自己点/工具点：不算「AI 主动控制模型」，但 auto 模式下仍按既有规矩拒绝（保持模式语义一致）
         if (!modeAllows(inst, 'anim')) return fail('mode-forbidden', modeForbidden(inst, 'anim').message)
-        const result = playPreset(state, inst, args?.action, log)
+        const result = playPreset(state, inst, args?.action, log, { source: 'tool' })
         if (!result.ok) return fail(result.code || 'preset-failed', `播放失败：${result.code ?? '未知'}`, result)
         return { ok: true, summary: toolSummary({ played: result.action, instanceId: inst.id }) }
       }
@@ -8387,7 +8946,7 @@ export function createLive2dTools(state, log) {
           const stopped = stopPresetSequence(state, inst)
           return { ok: true, summary: toolSummary({ stopped: stopped.stopped }) }
         }
-        const started = startPresetSequence(state, inst, String(args?.sequenceId || ''), log)
+        const started = startPresetSequence(state, inst, String(args?.sequenceId || ''), log, { source: 'tool' })
         if (!started.ok) return fail(started.code || 'sequence-failed', `启动失败：${started.code ?? '未知'}`, started)
         return { ok: true, summary: toolSummary(started) }
       }
@@ -8398,7 +8957,7 @@ export function createLive2dTools(state, log) {
 
   const toolParams = {
     name: 'live2d_params',
-    description: '列出当前模型真实可用的 Cubism 参数名（AI 设计自定义动作前先查，换模型时用它确认参数是否还在）。',
+    description: '列出当前模型真实可用的 Cubism 参数名、范围和默认值。设计挥手、踢腿、扭肩、跳舞等身体动作前必须先查；参数名和范围因皮套而异，不要只写很小的头眼动作值。',
     parameters: {
       type: 'object',
       properties: { instanceId: { type: 'string', description: '可选，指定实例' } },
@@ -8415,14 +8974,23 @@ export function createLive2dTools(state, log) {
       }
       const profile = profileFor(state, target.inst)
       const caps = profile?.capabilities ?? null
-      let summary = toolSummary({ instanceId: target.inst.id, count: known.count, at: known.at, params: known.params })
+      let summary = toolSummary({
+        instanceId: target.inst.id,
+        count: known.count,
+        at: known.at,
+        params: known.params,
+        paramMeta: known.paramMeta ?? {},
+      })
+      const bodyParams = known.params.filter((name) => /body|arm|hand|shoulder|elbow|forearm|wrist|hip|leg|foot|angle|rotation/i.test(String(name))).slice(0, 100)
+      summary += `\n\n【身体控制参数】${bodyParams.length ? bodyParams.join('、') : '没有识别到明显的身体/四肢参数，可优先使用 bodyX/bodyY/bodyZ 和头部动作'}`
+      summary += '\n设计建议：身体倾斜/扭转常见幅度 ±18~35；挥手、踢腿可写到 ±30~38；先查 paramMeta 的 min/max/default，再按范围取大约 70%~100% 幅度。'
       if (caps) {
         const by = (group) => caps.expressions.filter((item) => item.group === group).length
         const acts = (profile?.capabilityActions ?? []).map((item) => item.label)
         summary += `\n\n【模型能力】表情 ${by('face')} · 换装 ${by('clothes')} · 手势 ${by('gesture')} · 其它 ${by('other')}`
         if (acts.length) summary += `\n可做动作（右键菜单）：${acts.join('、')}`
         if (caps.motions.length) {
-          summary += `\n动画文件（motion3，model3.json 未注册，当前不播）：${caps.motions.map((item) => item.label).join('、')}`
+          summary += `\n已解析的 motion3 动画（即使 model3.json 未登记也可播放）：${caps.motions.map((item) => item.label).join('、')}`
         }
       } else {
         summary += '\n\n【模型能力】还没扫描过：让窗口渲染完成后，设置页点一次「重新生成」即可生成能力清单'
@@ -8480,6 +9048,50 @@ export function createLive2dTools(state, log) {
           bytes: shot.bytes,
           at: shot.at ?? null,
           hint: '用 read_image 打开 path 查看这张截图',
+        }),
+      }
+    },
+  }
+
+  const toolSelfView = {
+    name: 'live2d_self_view',
+    description:
+      '让 AI 查看自己的 Live2D 模型窗口，检查动作姿态、表情、挥手幅度和整体效果。只捕获插件自己的模型窗口，不截桌面其他区域；' +
+      '需要设置页开启“允许 AI 查看自己的模型窗口”。建议做完动作后等待 300~1200ms 再调用，用返回路径配合 read_image 查看。',
+    parameters: {
+      type: 'object',
+      properties: {
+        instanceId: { type: 'string', description: '可选，指定实例' },
+        delayMs: { type: 'number', description: '截图前等待多久，0~3000ms，默认 500ms' },
+      },
+      additionalProperties: false,
+    },
+    output: { schema: { type: 'object', properties: { ok: { type: 'boolean' }, summary: { type: 'string' } }, required: ['ok', 'summary'], additionalProperties: false }, render: (_args, value) => [{ type: 'text', text: value?.summary ?? '' }] },
+    async execute(args, exec) {
+      const sessionId = exec?.agent?.session?.id ?? null
+      const target = resolveToolTarget(state, { instanceId: args?.instanceId, sessionId })
+      if (!target.ok) return fail(target.code, target.message, { available: target.available })
+      if (!canControl(target.inst, 'self-view', { source: 'tool' })) {
+        return fail('self-view-forbidden', '设置页未允许 AI 查看自己的模型窗口，或当前模式没有对话工具权限')
+      }
+      const delayMs = Math.max(0, Math.min(3000, Math.round(Number(args?.delayMs ?? 500) || 0)))
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
+      const shot = await captureOwnWindow(instanceView(state, target.inst))
+      if (!shot.ok) return fail(shot.code || 'self-view-failed', shot.error || '捕获模型窗口失败')
+      let file = null
+      try {
+        file = saveCapturePng(shot.base64)
+        pruneCaptureDir()
+      } catch (error) {
+        return fail('self-view-save-failed', `截图成功但写临时文件失败：${errorText(error)}`)
+      }
+      return {
+        ok: true,
+        summary: toolSummary({
+          instanceId: target.inst.id,
+          path: file,
+          at: shot.at ?? null,
+          hint: '用 read_image 打开 path，检查当前动作是否自然、幅度是否足够',
         }),
       }
     },
@@ -8586,7 +9198,7 @@ export function createLive2dTools(state, log) {
     },
   }
 
-  return [toolStatus, toolBubble, toolPerform, toolAnim, toolWindow, toolScreen, toolCapture, toolMemory, toolPreset, toolParams, toolWake]
+  return [toolStatus, toolBubble, toolPerform, toolAnim, toolWindow, toolScreen, toolCapture, toolSelfView, toolMemory, toolPreset, toolParams, toolWake]
 }
 
 export function registerLive2dTools(ctx, state, log) {
@@ -8749,6 +9361,19 @@ export function apply(ctx, rawConfig) {
       }
     } catch (error) {
       log.warn(`live2d: 模式开关迁移失败（不影响启动）：${error && error.message}`)
+    }
+    try {
+      const isolated = ctx && typeof ctx.__live2dConfigFile === 'string'
+      if (!isolated) {
+        const removal = removeLegacyDemoDanceActions(state)
+        if (removal.marked) {
+          const saved = writeConfigFile(state.config, state.configFile ?? CONFIG_FILE)
+          if (!saved.ok) log.warn(`live2d: 旧版舞蹈示例清理标记写盘失败：${saved.error}`)
+        }
+        if (removal.changed) log.warn(`live2d: 已移除旧版演示动作「跳舞（10秒示例）」；模型自带舞蹈和“跳个舞”自建动作保留`)
+      }
+    } catch (error) {
+      log.warn(`live2d: 旧版舞蹈示例清理失败（不影响启动）：${errorText(error)}`)
     }
     setWarningSource(state, 'config', [...configWarnings, ...normalized.warnings])
     for (const warning of normalized.warnings) {

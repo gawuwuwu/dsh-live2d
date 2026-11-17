@@ -19,6 +19,7 @@ import {
   submitChat, flushChatQueue, pushIdleReplies,
   parseForegroundOutput, getForegroundTitle, screenWatchTick,
   parseCaptureOutput, requestScreenCapture, synthesizeSpeech, wavDurationMs,
+  captureOwnWindow,
   resolveToolTarget, createLive2dTools, registerLive2dTools, handlePresetTap, startPresetLoop,
   saveCapturePng, pruneCaptureDir,
   normalizeCustomActions, normalizePresetSequences, buildPresets, playPreset, startPresetSequence, stopPresetSequence,
@@ -29,8 +30,9 @@ import {
   createLifeRuntime, restoreLifeState, saveLifeState, normalizeWakeDriver, lifeStatusSnapshot, patchInstance,
   deriveAudience, memoryMutation, listMemories, searchMemories, memoryPromptLines, memoryStateFile,
   migrateModelProfiles, clearLegacyInstancePresets, profileFor, ensureProfileFor, patchProfile, savePresetsToProfile, PROFILE_ID_RE,
-  pickDefaultActions, libraryParamsHash, ensureAutoActions,
-  scanModelCapability, pickCapabilityActions,
+  pickDefaultActions, libraryParamsHash, ensureAutoActions, ACTION_LIBRARY,
+  performanceForAction, removeLegacyDemoDanceActions, LEGACY_DEMO_DANCE_ID,
+  scanModelCapability, pickCapabilityActions, parseMotion3Tracks,
   queueUiCommand, takeUiCommand,
 } from '../index.js'
 
@@ -185,7 +187,7 @@ const post = (ctx, path, body) => callRoute(ctx, path, { method: 'POST', body })
 const del_ = (ctx, path) => callRoute(ctx, path, { method: 'DELETE' })
 
 check('inject 声明了五个服务', JSON.stringify(inject) === JSON.stringify(['webServer', 'sessions', 'agents', 'sessionTitle', 'tools']), JSON.stringify(inject))
-check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VERSION} / ${STAGE}`)
+check('版本/阶段已升级', VERSION === '0.3.0' && STAGE === 'P2-P3', `${VERSION} / ${STAGE}`)
 
 // --- 1. 正常加载 + P1 + P3 ------------------------------------------------
 {
@@ -502,15 +504,24 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
   check('配置坏 JSON → ok:false 带 error', readConfigFile(brokenFile).ok === false, String(readConfigFile(brokenFile).error).slice(0, 80))
 
   // 模型探测
-  // 模型探测（临时 fixture，不依赖本机模型目录）
-  const modelFixture = path.join(tmpDir, 'model-fixture')
-  fs.mkdirSync(modelFixture, { recursive: true })
-  fs.writeFileSync(path.join(modelFixture, 'test.model3.json'), JSON.stringify({ Version: 3, FileReferences: { Moc: 'test.moc3', Textures: ['tex.png'], Physics: 'test.physics3.json' } }))
-  fs.writeFileSync(path.join(modelFixture, 'test.moc3'), 'MOC3')
-  fs.writeFileSync(path.join(modelFixture, 'tex.png'), 'PNG')
-  fs.writeFileSync(path.join(modelFixture, 'test.physics3.json'), '{}')
-  const realModel = modelProbe(modelFixture)
-  check('模型探测通过（fixture）', realModel.ok === true && realModel.format === 'cubism4' && realModel.entryFile === 'test.model3.json', JSON.stringify({ ok: realModel.ok, entryFile: realModel.entryFile, missing: realModel.missing }))
+  const realModelDir = process.env.LIVE2D_TEST_MODEL || ''
+  let realModel = null
+  if (realModelDir) {
+    realModel = modelProbe(realModelDir)
+    check('真实模型探测通过', realModel.ok === true && realModel.format === 'cubism4', JSON.stringify({ ok: realModel.ok, entryFile: realModel.entryFile, missing: realModel.missing }))
+  } else {
+    console.log('SKIP  真实模型探测：未设置 LIVE2D_TEST_MODEL')
+    realModel = {
+      ok: true,
+      entry: path.join(tmpDir, 'placeholder.model3.json'),
+      entryFile: 'placeholder.model3.json',
+      modelDir: tmpDir,
+      format: 'cubism4',
+      reason: null,
+      message: null,
+      missing: [],
+    }
+  }
   const noDir = modelProbe(path.join(tmpDir, 'no-such-dir'))
   check('模型目录不存在 → missing-dir', noDir.ok === false && noDir.reason === 'missing-dir', JSON.stringify(noDir.reason))
   const cubism2Dir = path.join(tmpDir, 'c2')
@@ -636,7 +647,7 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
     windows: { send: () => ({ ok: true }) },
   }
   const init = initPayload(state)
-  check('initPayload 带 entryFile 与 assetBase', init.model.entryFile === 'test.model3.json' && init.assetBase === 'live2d-asset://model/', JSON.stringify(init.model))
+  check('initPayload 带 entryFile 与 assetBase', String(init.model.entryFile || '').endsWith('.model3.json') && init.assetBase === 'live2d-asset://model/', JSON.stringify(init.model))
   const initBound = initPayload({ config: { ...config, sessionId: 's1' }, model: realModel, id: 'inst-2' })
   check('initPayload 带 instanceId 与 sessionId（标题未解析时不显示成未绑定）', initBound.instanceId === 'inst-2' && initBound.sessionId === 's1', JSON.stringify({ id: initBound.instanceId, sid: initBound.sessionId }))
 
@@ -717,7 +728,7 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
   check('chat 上一条未回 → 409', again.statusCode === 409, again.body)
 
   // 模拟 assistant 回复落盘 + agent 空闲 → 应该推一条 reply
-  ctx._sessionState.messages.push({ role: 'assistant', content: [{ type: 'text', text: '我在呀。' }] })
+  ctx._sessionState.messages.push({ role: 'assistant', content: [{ type: 'text', text: '我在呀，主人。' }] })
   ctx.emitForTest('agent/status', { status: 'idle' })
   await new Promise((resolve) => setTimeout(resolve, 600))
   const reply = sent.filter((item) => item.type === 'reply').pop()
@@ -786,8 +797,7 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
   check('重复 sessionId → 409 duplicate-session', dupSession.statusCode === 409 && JSON.parse(dupSession.body).code === 'duplicate-session', dupSession.body)
 
   // 唯一性：同一模型不能两份
-  await post(ctx, '/live2d/instances/inst-1', { modelPath: 'D:\\dup' })
-  const dupModel = await post(ctx, '/live2d/instances/inst-2', { modelPath: 'D:\\dup' })
+  const dupModel = await post(ctx, '/live2d/instances/inst-2', { modelPath: state.instances[0].config.modelPath })
   check('重复 modelPath → 409 duplicate-model', dupModel.statusCode === 409 && JSON.parse(dupModel.body).code === 'duplicate-model', dupModel.body)
 
   // 两个窗口互不影响：只有目标实例收到 config
@@ -820,12 +830,12 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
   const titleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'live2d-title-'))
   fs.writeFileSync(path.join(titleDir, 'abc.json'), JSON.stringify({ record: { rows: { title: { val: '缓存里的会话名' } } } }), 'utf8')
   // 下拉扫描只认会话文件（UUID 名，可带 session- 前缀）；workspace-cache.json 这类要跳过
-  fs.writeFileSync(path.join(titleDir, 'session-0e4b8887-34c5-4256-bf57-7613027acff7.json'), JSON.stringify({ record: { rows: { title: { val: '另一个会话' } } } }), 'utf8')
+  fs.writeFileSync(path.join(titleDir, 'session-11111111-2222-3333-4444-555555555555.json'), JSON.stringify({ record: { rows: { title: { val: '另一个会话' } } } }), 'utf8')
   fs.writeFileSync(path.join(titleDir, 'workspace-cache.json'), JSON.stringify({ record: { rows: { title: { val: '不是会话' } } } }), 'utf8')
   check('titleFromProjCache 读 record.rows.title.val', titleFromProjCache('session-abc', titleDir) === '缓存里的会话名', String(titleFromProjCache('session-abc', titleDir)))
   // 下拉数据源：sessions 服务只给活跃会话时，projcache 里的不活跃会话要能补进来
   const pickerRows = collectSessionsForPicker({}, 20, titleDir)
-  check('会话下拉补出不活跃会话', pickerRows.some((row) => row.id === 'session-0e4b8887-34c5-4256-bf57-7613027acff7' && row.title === '另一个会话') && !pickerRows.some((row) => row.id.includes('workspace-cache')), JSON.stringify(pickerRows))
+  check('会话下拉补出不活跃会话', pickerRows.some((row) => row.id === 'session-11111111-2222-3333-4444-555555555555' && row.title === '另一个会话') && !pickerRows.some((row) => row.id.includes('workspace-cache')), JSON.stringify(pickerRows))
   fs.rmSync(titleDir, { recursive: true, force: true })
 
   // 视图隔离：inst-1 的 renderer 不受 inst-2 影响
@@ -862,9 +872,17 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
   check('DELETE 不存在实例 → 404', ghostDelete.statusCode === 404, ghostDelete.body)
 
   // /live2d/models：扫到真实模型并标注占用
+  const modelScanRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'live2d-models-'))
+  const fixtureModelDir = path.join(modelScanRoot, 'fixture-model')
+  fs.mkdirSync(fixtureModelDir)
+  fs.writeFileSync(path.join(fixtureModelDir, 'fixture.model3.json'), '{}')
+  state.instances[0].config.modelRoots = [modelScanRoot]
+  state.config.instances[0].modelRoots = [modelScanRoot]
+  state.config.modelRoots = [modelScanRoot]
   const modelsRes = await get(ctx, '/live2d/models')
   const models = JSON.parse(modelsRes.body)
   check('GET /live2d/models 能扫到模型', modelsRes.statusCode === 200 && models.models.length >= 1 && models.models[0].entry.endsWith('.model3.json'), JSON.stringify(models.models?.[0]))
+  fs.rmSync(modelScanRoot, { recursive: true, force: true })
 
   // validateInstances / normalizeModelKey 纯函数
   check('normalizeModelKey 归一化大小写与尾斜杠', normalizeModelKey('D:\\Live2D\\A\\') === normalizeModelKey('d:\\live2d\\a'), normalizeModelKey('D:\\Live2D\\A\\'))
@@ -958,7 +976,7 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
     id: 's-auto',
     deriveMessages: () => [
       { role: 'user', content: [{ type: 'text', text: '在吗' }] },
-      { role: 'assistant', content: [{ type: 'text', text: '在的。' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '在的，主人。' }] },
     ],
   }
   // 0.13.0：气泡由「回复来源」决定，不再由模式一刀切
@@ -970,7 +988,7 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
   commands.length = 0
   const pushedWindow = autoPushReply(autoState, session, () => {}, null, 'window-chat')
   check('auto + window-chat 推气泡', pushedWindow === 1
-    && commands.some((item) => item.command.type === 'bubble' && item.command.text === '在的。'),
+    && commands.some((item) => item.command.type === 'bubble' && item.command.text === '在的，主人。'),
     JSON.stringify(commands.map((item) => item.command.type)))
 
   commands.length = 0
@@ -1399,8 +1417,10 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
   check('工具：没有会话 id 时拒绝', missingSession.ok === false && missingSession.code === 'missing-session', JSON.stringify({ code: missingSession.code }))
 
   const tools = createLive2dTools(state, { info() {}, warn() {}, error() {} })
-  const expectedNames = 'live2d_status,live2d_bubble,live2d_perform,live2d_anim,live2d_window,live2d_screen,live2d_screen_capture,live2d_memory,live2d_preset,live2d_params,live2d_wake'
-  check('工具：注册了 11 个能力', tools.length === 11 && tools.map((t) => t.name).join(',') === expectedNames, tools.map((t) => t.name).join(','))
+  const expectedNames = 'live2d_status,live2d_bubble,live2d_perform,live2d_anim,live2d_window,live2d_screen,live2d_screen_capture,live2d_self_view,live2d_memory,live2d_preset,live2d_params,live2d_wake'
+  check('工具：注册了 12 个能力', tools.length === 12 && tools.map((t) => t.name).join(',') === expectedNames, tools.map((t) => t.name).join(','))
+  check('工具：AI 可以查看自己的模型窗口',
+    tools.find((t) => t.name === 'live2d_self_view')?.parameters?.properties?.delayMs?.type === 'number')
   const performTool = tools.find((t) => t.name === 'live2d_perform')
   check('工具：结构化表演参数完整', performTool?.parameters?.properties?.lookAt?.enum?.includes('user')
     && performTool?.parameters?.properties?.anim?.type === 'string'
@@ -1500,7 +1520,8 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
 
   // 预设交互：点模型/摸头 → 动作 + 冷却；空闲循环受 idlePresets 控制
   const presetSent = []
-  const presetState = apply(makeCtx(), {
+  const presetCtx = makeCtx()
+  const presetState = apply(presetCtx, {
     autoOpenWindow: false,
     instances: [{ id: 'inst-1', sessionId: 's-auto', mode: 'manual', autoInteract: true, idlePresets: true }],
   })
@@ -1542,6 +1563,17 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
     { id: 'nokeys', tracks: [] },
   ], actWarn2)
   check('自定义动作：非法 id / 内置重名 / 无轨道都被拒', customBad.length === 0 && actWarn2.length === 3, String(actWarn2.length))
+  const poseKeys = Array.from({ length: 32 }, (_, index) => [index / 31, index % 2 ? 8 : -8])
+  const poseWarn = []
+  const poseAction = normalizeCustomActions([{
+    id: 'pose-32',
+    label: '32 步姿势',
+    durationMs: 4800,
+    tracks: [{ param: 'headZ', keys: poseKeys }],
+  }], poseWarn)
+  check('姿势设计器：32 个起始/中间/最终关键帧不会被截断',
+    poseAction.length === 1 && poseAction[0].tracks[0].keys.length === 32 && poseWarn.length === 0,
+    String(poseAction[0]?.tracks?.[0]?.keys?.length ?? 0))
 
   const seqWarn = []
   const seqOk = normalizePresetSequences([{ id: 'loop1', steps: ['happy', 'nod'], intervalMs: 2000, loop: true }], seqWarn)
@@ -1559,6 +1591,29 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
       && !presets.actions.some((a) => a.kind === 'builtin')
       && presets.sequences.length === 1,
     String(presets.actions.length))
+
+  presetSent.length = 0
+  const editorOpenRes = await post(presetCtx, '/live2d/preset', {
+    op: 'editor-open',
+    instanceId: 'inst-1',
+    actionId: 'wave',
+  })
+  const editorOpenBody = JSON.parse(editorOpenRes.body)
+  const editorOpenCommand = presetSent.find((item) => item.type === 'pose-editor-open')
+  check('姿势设计器：HTTP 按当前档案解析已有动作并下发窗口',
+    editorOpenRes.statusCode === 200
+      && editorOpenBody.ok === true
+      && editorOpenCommand?.action?.id === 'wave'
+      && editorOpenCommand?.action?.tracks?.length === 1,
+    JSON.stringify({ status: editorOpenRes.statusCode, body: editorOpenBody, command: editorOpenCommand }))
+  const editorMissingRes = await post(presetCtx, '/live2d/preset', {
+    op: 'editor-open',
+    instanceId: 'inst-1',
+    actionId: 'missing-pose',
+  })
+  check('姿势设计器：载入不属于当前档案的动作会被明确拒绝',
+    editorMissingRes.statusCode === 404 && JSON.parse(editorMissingRes.body).ok === false,
+    editorMissingRes.body)
 
   const played = playPreset(presetState, pinst, 'wave', () => {})
   check('预设动作：自定义动作可播', played.ok === true && played.action === 'wave', JSON.stringify(played))
@@ -1625,6 +1680,32 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
     const onDisk = JSON.parse(fs.readFileSync(tmpProfileFile, 'utf8'))
     check('档案保存：建档案并落盘', saved.ok === true && onDisk.modelProfiles && Object.keys(onDisk.modelProfiles).length === 1, JSON.stringify(Object.keys(onDisk.modelProfiles ?? {})))
     check('档案保存：落盘带绑定表', Object.keys(onDisk.modelPathBindings ?? {}).length === 1, JSON.stringify(onDisk.modelPathBindings))
+
+    const poseState = {
+      config: normalizeConfig({ instances: [{ id: 'inst-pose', modelPath: 'D:\\pose-profile' }] }).config,
+      warnings: [], warningSources: {}, disposed: false, configFile: tmpProfileFile,
+    }
+    poseState.root = poseState
+    const poseInst = { ...poseState.config.instances[0], window: { ready: true, state: 'running' }, anim: {}, bubble: {}, preset: {} }
+    poseState.instances = [poseInst]
+    const poseSent = []
+    poseState.windows = { send(command, id) { poseSent.push({ command, id }); return { ok: true } } }
+    ensureProfileFor(poseState, poseInst)
+    applyWindowMessage(instanceView(poseState, poseInst), {
+      type: 'pose-save',
+      draft: {
+        id: 'pose-editor-save',
+        label: '姿势设计器保存',
+        durationMs: 4800,
+        tracks: [{ param: 'headZ', keys: poseKeys }],
+      },
+    })
+    const poseResult = poseSent.find((item) => item.command?.type === 'pose-save-result')?.command
+    const poseSavedProfile = profileFor(poseState, poseInst)
+    check('姿势设计器：保存结果回报并写入当前模型档案',
+      poseResult?.ok === true
+        && poseSavedProfile?.customActions?.some((item) => item.id === 'pose-editor-save' && item.tracks?.[0]?.keys?.length === 32),
+      JSON.stringify({ result: poseResult, actions: poseSavedProfile?.customActions?.map((item) => item.id) }))
     try { fs.rmSync(tmpProfileFile, { force: true }) } catch { /* ignore */ }
 
     // 读取：实例视图的 config 自动代理到档案
@@ -1639,12 +1720,50 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
 
   // 0.4.0 词条库：按模型真实参数挑默认动作（换模型不再「做不出来」）
   {
-    const stdParams = ['ParamAngleX', 'ParamAngleY', 'ParamAngleZ', 'ParamBodyAngleX', 'ParamEyeLOpen', 'ParamEyeROpen',
-      'ParamEyeBallX', 'ParamEyeBallY', 'ParamMouthForm', 'ParamMouthOpenY', 'ParamBrowLY', 'ParamBrowRY', 'ParamBreath']
+    const stdParams = ['ParamAngleX', 'ParamAngleY', 'ParamAngleZ', 'ParamBodyAngleX', 'ParamBodyAngleY', 'ParamBodyAngleZ', 'ParamEyeLOpen', 'ParamEyeROpen',
+      'ParamEyeBallX', 'ParamEyeBallY', 'ParamMouthForm', 'ParamMouthOpenY', 'ParamBrowLY', 'ParamBrowRY', 'ParamBreath', 'ParamHipAngleX']
     const picked = pickDefaultActions(stdParams, 10)
     check('词条库：标准模型能挑满 10 个', picked.length === 10, String(picked.length))
     check('词条库：挑出的动作都带可落地轨道', picked.every((a) => Array.isArray(a.tracks) && a.tracks.length > 0), JSON.stringify(picked.map((a) => a.id)))
     check('词条库：id 带 auto- 前缀', picked.every((a) => String(a.id).startsWith('auto-')), picked[0]?.id)
+    check('词条库：默认动作至少包含 2 个身体动作',
+      picked.filter((a) => a.body === true).length >= 2,
+      JSON.stringify(picked.map((a) => ({ id: a.id, body: a.body === true }))))
+    check('词条库：保留“跳个舞”全身舞动入口',
+      picked.some((action) => action.id === 'auto-dance-basic' && action.label === '全身舞动'),
+      JSON.stringify(picked.map((action) => action.id)))
+
+    const armParams = [...stdParams, 'Param_arm_R1', 'Param_arm_R2', 'Param_arm_R3']
+    const armPicked = pickDefaultActions(armParams, 10)
+    check('词条库：有手臂参数时生成大幅挥手动作',
+      armPicked.some((a) => a.id === 'auto-wave-big'
+        && ['Param_arm_R1', 'Param_arm_R2', 'Param_arm_R3'].every((param) => a.tracks.some((t) => t.param === param))),
+      JSON.stringify(armPicked.map((a) => a.id)))
+    const ratioPicked = pickDefaultActions(armParams, 10, {
+      Param_arm_R1: { min: -1, max: 1, default: 0 },
+      Param_arm_R2: { min: -1, max: 1, default: 0 },
+      Param_arm_R3: { min: -1, max: 1, default: 0 },
+    })
+    const ratioWave = ratioPicked.find((a) => a.id === 'auto-wave-big')
+    check('词条库：-1~1 的手臂参数自动换算，不写死 ±40',
+      ratioWave && ratioWave.tracks
+        .filter((track) => /Param_arm_R[123]/.test(track.param))
+        .every((track) => track.keys.every(([, value]) => Math.abs(Number(value)) <= 1.0001)),
+      JSON.stringify(ratioWave?.tracks))
+    const namedArmParams = [...stdParams, 'RArm', 'RForearm', 'RWrist']
+    const namedArmMeta = {
+      RArm: { min: -1, max: 1, default: 0 },
+      RForearm: { min: -1, max: 1, default: 0 },
+      RWrist: { min: -1, max: 1, default: 0 },
+    }
+    const namedArmPicked = pickDefaultActions(namedArmParams, 10, namedArmMeta)
+    const namedWave = namedArmPicked.find((a) => a.id === 'auto-wave-big')
+    check('词条库：支持 RArm/RForearm/RWrist 三段挥手并换算到 -1~1',
+      namedWave
+        && ['RArm', 'RForearm', 'RWrist'].every((param) => namedWave.tracks.some((track) => track.param === param))
+        && namedWave.tracks.filter((track) => ['RArm', 'RForearm', 'RWrist'].includes(track.param))
+          .every((track) => track.keys.every(([, value]) => Math.abs(Number(value)) <= 1.0001)),
+      JSON.stringify(namedWave?.tracks))
 
     const expParams = [...stdParams, 'PARAM_EXP3', 'PARAM_EXP4', 'PARAM_EXP5', 'PARAM_EXP6', 'PARAM_EXP7', 'PARAM_EXP8', 'ParamEyeSmile']
     const pickedExp = pickDefaultActions(expParams, 10)
@@ -1667,6 +1786,9 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
     check('词条库：参数变了重新挑', changed.ok === true && changed.changed === true, JSON.stringify({ ok: changed.ok, changed: changed.changed }))
     const autoPresets = buildPresets(autoState.config.instances[0], profileFor(autoState, autoState.config.instances[0]))
     check('词条库：自动动作进动作菜单', autoPresets.actions.some((a) => String(a.id).startsWith('auto-')), String(autoPresets.actions.length))
+    check('词条库：身体动作标记经过档案归一化仍保留',
+      autoPresets.actions.filter((a) => a.body === true).length >= 2,
+      JSON.stringify(autoPresets.actions.map((a) => ({ id: a.id, body: a.body === true }))))
 
     const autoId = autoPresets.actions.find((a) => String(a.id).startsWith('auto-'))?.id
     patchProfile(autoState, Object.values(autoState.config.modelProfiles)[0].id, {
@@ -1682,38 +1804,76 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
     check('动作覆盖：同 ID 自定义动作替换默认动作且只保留一份',
       sameId.length === 1 && sameId[0].auto !== true && sameId[0].label === '调整后的默认动作',
       JSON.stringify(sameId))
+
+    const legacyState = {
+      config: normalizeConfig({ instances: [{ id: 'inst-dance', modelPath: 'D:\\dance-model' }] }).config,
+      warnings: [],
+      configFile: path.join(os.tmpdir(), `live2d-dance-${Date.now()}-${Math.random().toString(36).slice(2)}.json`),
+    }
+    legacyState.root = legacyState
+    legacyState.instances = [{ id: 'inst-dance', config: legacyState.config.instances[0] }]
+    const legacyProfile = ensureProfileFor(legacyState, legacyState.instances[0]).profile
+    patchProfile(legacyState, legacyProfile.id, {
+      customActions: [
+        { id: LEGACY_DEMO_DANCE_ID, label: '跳舞（10秒示例）', durationMs: 10000, tracks: [{ param: 'bodyX', keys: [[0, 0], [1, 0]] }] },
+        { id: 'my-dance', label: '我的舞蹈', durationMs: 3000, tracks: [{ param: 'bodyX', keys: [[0, 0], [1, 10]] }] },
+      ],
+      presetSequences: [{ id: 'dance-loop', label: '舞蹈循环', steps: [LEGACY_DEMO_DANCE_ID, 'my-dance'], intervalMs: 2000 }],
+    })
+    const removedDemo = removeLegacyDemoDanceActions(legacyState)
+    const cleanedProfile = profileFor(legacyState, legacyState.instances[0])
+    check('0.3.0：旧版「跳舞（10秒示例）」已从不重复注入',
+      removedDemo.changed === true && !cleanedProfile.customActions.some((action) => action.id === LEGACY_DEMO_DANCE_ID),
+      JSON.stringify(removedDemo))
+    check('0.3.0：用户自建舞蹈和“跳个舞”能力保留',
+      cleanedProfile.customActions.some((action) => action.id === 'my-dance')
+        && cleanedProfile.presetSequences.some((seq) => seq.steps.includes('my-dance') && !seq.steps.includes(LEGACY_DEMO_DANCE_ID))
+        && ACTION_LIBRARY.some((action) => action.id === 'dance-basic' && action.label === '全身舞动'),
+      JSON.stringify(cleanedProfile.customActions.map((action) => action.id)))
+    const removedAgain = removeLegacyDemoDanceActions(legacyState)
+    check('0.3.0：演示动作清理迁移只运行一次', removedAgain.marked === false && removedAgain.changed === false)
+    try { fs.rmSync(legacyState.configFile, { force: true }) } catch { /* ignore */ }
     try { fs.rmSync(tmpAutoFile, { force: true }) } catch { /* ignore */ }
   }
 
   // 0.5.0 模型能力：扫模型包里的表情 / 换装 / 动作文件，挑出能直接用的 hold 动作
   {
-    // 能力扫描 fixture：不依赖本机模型包
-    const capDir = fs.mkdtempSync(path.join(os.tmpdir(), 'live2d-cap-'))
-    fs.mkdirSync(path.join(capDir, 'Exp3'), { recursive: true })
-    fs.mkdirSync(path.join(capDir, 'Animation'), { recursive: true })
-    fs.writeFileSync(path.join(capDir, 'test.model3.json'), JSON.stringify({ Version: 3, FileReferences: { Moc: 'test.moc3', Textures: [], Physics: '' } }))
-    fs.writeFileSync(path.join(capDir, 'Exp3', '裙子切换.exp3.json'), JSON.stringify({ Type: 'Live2D Expression', Parameters: [{ Id: 'Clothes1', Value: -1 }] }))
-    fs.writeFileSync(path.join(capDir, 'Exp3', '脸红.exp3.json'), JSON.stringify({ Type: 'Live2D Expression', Parameters: [{ Id: 'key7', Value: 1 }] }))
-    fs.writeFileSync(path.join(capDir, 'Exp3', '竖食指开.exp3.json'), JSON.stringify({ Type: 'Live2D Expression', Parameters: [{ Id: 'Movement1', Value: 0 }, { Id: 'Movement3', Value: 1 }] }))
-    fs.writeFileSync(path.join(capDir, 'Exp3', '前倾.exp3.json'), JSON.stringify({ Type: 'Live2D Expression', Parameters: [{ Id: 'ParamAngleX', Value: 0, Blend: 'Add' }] }))
-    fs.writeFileSync(path.join(capDir, 'Animation', 'idle.motion3.json'), '{}')
-    fs.writeFileSync(path.join(capDir, 'Animation', 'wave.motion3.json'), '{}')
+    const capDir = process.env.LIVE2D_CAPABILITY_MODEL || ''
     if (!fs.existsSync(capDir)) {
       console.log('SKIP  能力扫描：本机没有测试模型目录')
     } else {
       const scan = scanModelCapability(capDir)
-      check('能力：扫到表情/换装', scan.ok === true && scan.expressions.length >= 4, String(scan.expressions.length))
+      check('能力：扫到表情/换装', scan.ok === true && scan.expressions.length >= 20, String(scan.expressions.length))
       check('能力：换装按参数分组', scan.expressions.some((e) => e.group === 'clothes' && e.params.some((p) => p.param === 'Clothes1')),
         JSON.stringify(scan.expressions.filter((e) => e.group === 'clothes').map((e) => e.label)))
-      check('能力：动画文件单独记录且未注册', scan.motions.length >= 2 && scan.motions.every((m) => m.registered === false), String(scan.motions.length))
+      check('能力：动画文件单独记录且未注册', scan.motions.length >= 5 && scan.motions.every((m) => m.registered === false), String(scan.motions.length))
+      check('能力：未注册 motion3 已解析成参数轨道',
+        scan.motions.every((m) => m.durationMs > 0 && Array.isArray(m.tracks) && m.tracks.length > 0),
+        JSON.stringify(scan.motions.map((m) => [m.label, m.tracks?.length ?? 0])))
+      const chestMotion = scan.motions.find((m) => m.label === '抚胸')
+      check('能力：识别作者的抚胸专用动画', Boolean(chestMotion)
+        && chestMotion.tracks.some((track) => track.param === 'Movement2')
+        && chestMotion.tracks.some((track) => track.param === 'Param56'), JSON.stringify(chestMotion))
+      const parsedMotion = parseMotion3Tracks({
+        Curves: [{ Target: 'Parameter', Id: 'ParamAngleZ', Segments: [0, 0, 0, 1, 20] }],
+      })
+      check('motion3 解析：线性曲线生成起止关键帧',
+        parsedMotion.length === 1 && parsedMotion[0].keys.length === 2
+          && parsedMotion[0].keys[1][1] === 20 && parsedMotion[0].keys[1][0] === 1,
+        JSON.stringify(parsedMotion))
       const capParams = ['ParamAngleX', 'ParamAngleY', 'ParamAngleZ', 'ParamBodyAngleX', 'ParamEyeLOpen', 'ParamEyeROpen',
         'ParamEyeBallX', 'ParamEyeBallY', 'ParamMouthForm', 'ParamMouthOpenY', 'ParamBrowLY', 'ParamBrowRY', 'ParamBreath',
-        'Clothes1', 'Clothes2', 'Clothes3', 'Clothes4', 'Clothes5', 'Movement1', 'Movement3',
+        'Clothes1', 'Clothes2', 'Clothes3', 'Clothes4', 'Clothes5', 'Movement1', 'Movement2', 'Movement3',
+        'Param56', 'Param57', 'Param58', 'Param59', 'Param60', 'Param61', 'Param62',
         'key1', 'key2', 'key3', 'key4', 'key5', 'key6', 'key7', 'key8', 'key9', 'key10', 'key11', 'key12', 'key13']
       const acts = pickCapabilityActions(scan, capParams)
-      check('能力：挑出可用的 hold 动作', acts.length >= 4 && acts.every((a) => a.hold === true), String(acts.length))
-      check('能力：hold 动作首键取当前值', acts.every((a) => a.tracks.every((t) => t.keys[0][1] === 'current')), '')
+      check('能力：挑出可用的 hold 动作', acts.length >= 16 && acts.every((a) => a.hold === true), String(acts.length))
+      check('能力：表情/换装 hold 动作首键取当前值',
+        acts.filter((a) => a.tracks.some((t) => t.keys[0][1] === 'current')).length >= 16, '')
       check('能力：换装动作带 Clothes 轨道', acts.some((a) => a.group === 'clothes' && a.tracks.some((t) => String(t.param).startsWith('Clothes'))), '')
+      check('能力：抚胸动画可直接从模型菜单播放',
+        acts.some((a) => a.label === '抚胸' && a.tracks.some((track) => track.param === 'Movement2')),
+        JSON.stringify(acts.filter((a) => a.label?.includes('抚胸')).map((a) => a.id)))
     }
   }
 
@@ -1785,13 +1945,31 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
   check('截图落盘：只保留最近 10 张', kept === 10, String(kept))
   fs.rmSync(shotDir, { recursive: true, force: true })
 
+  const selfViewInst = {
+    id: 'inst-self-view',
+    config: { selfInspectEnabled: true },
+    window: { ready: true },
+  }
+  const selfViewState = { instances: [selfViewInst], config: {}, warnings: [] }
+  selfViewState.root = selfViewState
+  selfViewState.windows = {
+    send(command) {
+      queueMicrotask(() => applyWindowMessage(instanceView(selfViewState, selfViewInst), {
+        type: 'screenshot', id: command.id, ok: true, base64: 'iVBORw0KGgo=', at: 'now',
+      }))
+      return { ok: true }
+    },
+  }
+  const selfShot = await captureOwnWindow(instanceView(selfViewState, selfViewInst))
+  check('自检截图：只通过模型窗口通道取图', selfShot.ok === true && selfShot.base64 === 'iVBORw0KGgo=', JSON.stringify(selfShot))
+
   const noTools = registerLive2dTools({ get() {}, tools: undefined }, state, { info() {}, warn() {}, error() {} })
   check('工具：宿主没有 tools 服务时安全降级', typeof noTools === 'function', typeof noTools)
   noTools()
 
   const registered = []
   const dispose = registerLive2dTools({ tools: { register: (tool) => { registered.push(tool.name); return () => {} } } }, state, { info() {}, warn() {}, error() {} })
-  check('工具：可注册到宿主', registered.length === 11, registered.join(','))
+  check('工具：可注册到宿主', registered.length === 12, registered.join(','))
   dispose()
 }
 
@@ -1803,6 +1981,12 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
     wake: { state: 'idle', times: [] },
   }
   check('权限：anim 在 auto 拒绝', canControl({ config: { mode: 'auto' } }, 'anim', { source: 'tool' }) === false)
+  check('权限：手动模式可显式允许对话工具控制',
+    canControl({ config: { mode: 'auto', manualToolsEnabled: true } }, 'anim', { source: 'tool' }) === true
+    && canControl({ config: { mode: 'auto', manualToolsEnabled: true } }, 'bubble', { source: 'tool' }) === true
+    && canControl({ config: { mode: 'auto', manualToolsEnabled: true } }, 'screen', { source: 'tool' }) === true
+    && canControl({ config: { mode: 'auto', manualToolsEnabled: true, selfInspectEnabled: true } }, 'self-view', { source: 'tool' }) === true
+    && canControl({ config: { mode: 'auto', manualToolsEnabled: true } }, 'anim', { source: 'wake-timer' }) === false)
   check('权限：anim 在 semi 允许', canControl(inst, 'anim', { source: 'tool' }) === true)
   check('权限：bubble 在 auto + window-chat 允许', canControl({ config: { mode: 'auto' } }, 'bubble', { source: 'window-chat' }) === true)
   check('权限：bubble 在 auto + wake-button 允许', canControl({ config: { mode: 'auto' } }, 'bubble', { source: 'wake-button' }) === true)
@@ -1813,6 +1997,21 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
     canControl({ config: { mode: 'manual', aiMoveEnabled: false } }, 'window', { source: 'tool' }) === false
     && canControl({ config: { mode: 'manual', aiMoveEnabled: true } }, 'window', { source: 'tool' }) === true
     && canControl({ config: { mode: 'semi', aiMoveEnabled: true } }, 'window', { source: 'tool' }) === false)
+  const highLife = {
+    config: { mode: 'manual', lifeEnabled: true },
+    life: { mood: 0.85, energy: 0.9, boredom: 0.05, proactiveSinceUser: 0 },
+  }
+  const lowLife = {
+    config: { mode: 'manual', lifeEnabled: true },
+    life: { mood: -0.8, energy: 0.2, boredom: 0.8, proactiveSinceUser: 0 },
+  }
+  const highPerf = performanceForAction(highLife, 'tool')
+  const lowPerf = performanceForAction(lowLife, 'tool')
+  check('自动模式：高心情动作更快更大，低心情更慢更收敛',
+    highPerf && lowPerf && highPerf.speed > lowPerf.speed && highPerf.amplitude > lowPerf.amplitude,
+    JSON.stringify({ highPerf, lowPerf }))
+  check('半自动模式：AI 动作不叠加生命感参数',
+    performanceForAction({ config: { mode: 'semi', lifeEnabled: true }, life: highLife.life }, 'tool') === null)
 
   const now = Date.now()
   const fresh = { config: { wakeMaxPerHour: 3 }, wake: { times: [now - 1000, now - 2000] } }
@@ -1843,7 +2042,9 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
     now,
   )
   check('唤醒消息：带标题、截图路径与语气要求',
-    text.includes('Plain Craft Launcher') && text.includes('a.png') && text.includes('read_image') && text.includes('主动'),
+    text.includes('Plain Craft Launcher') && text.includes('a.png') && text.includes('read_image')
+      && text.includes('主动') && text.includes('游戏时') && text.includes('应援') && text.includes('live2d_perform')
+      && text.includes('每 2~3 次回应') && text.includes('bodyX/bodyY/bodyZ') && text.includes('±30~40'),
     text.slice(0, 80))
 
   const autoText = buildWakeMessage({ config: { mode: 'auto' } }, { title: '', shots: [], mode: 'none' }, 'wake-button', now)
@@ -2048,10 +2249,17 @@ check('版本/阶段已升级', VERSION === '0.2.0' && STAGE === 'P2-P3', `${VER
   const timerMessage = buildWakeMessage(inst, { title: '记事本', shots: [], mode: 'title' }, 'wake-timer', now)
   check('陪伴：机械唤醒也带真实时间与上次互动', timerMessage.includes('时间感') && timerMessage.includes('星期') && timerMessage.includes('距离用户上次互动'))
 
+  markUserActivity(st, null, 'tap', now + 1)
+  const moodSnap = lifeStatusSnapshot(inst)
+  check('陪伴：心情变化带原因和时间记录',
+    moodSnap.moodReason.includes('摸了摸') && inst.life.moodEvents.some((item) => item.reason.includes('摸了摸')),
+    JSON.stringify({ reason: moodSnap.moodReason, events: inst.life.moodEvents }))
+
   const lifeFile = path.join(path.dirname(st.configFile), 'life-state.json')
   check('陪伴：状态可持久化', saveLifeState(st, lifeFile).ok === true && fs.existsSync(lifeFile))
   inst.life.energy = 0.01
   check('陪伴：状态可恢复', restoreLifeState(st, lifeFile).restored === 1 && inst.life.energy > 0.5)
+  check('陪伴：心情记录可持久化', Array.isArray(inst.life.moodEvents) && inst.life.moodEvents.length > 0)
 }
 
 // --- 0.3.0 P2/P3：观众、按会话记忆、触摸分区与双模型关系 ------------------

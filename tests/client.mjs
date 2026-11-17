@@ -116,6 +116,9 @@ check('默认动作可单独重新生成', clientSource.includes('/auto-actions'
 check('动作页有表情换装分组', clientSource.includes('表情 / 换装（模型自带）')
   && clientSource.includes('profile?.capabilityActions')
   && clientSource.includes('点一次开，再点一次关'))
+check('模型自带动作会展示已解析的未登记 motion3',
+  clientSource.includes('未登记动画文件')
+    && clientSource.includes('直接解析'))
 check('能力动作进循环候选且不自带写死动作',
   clientSource.includes('for (const item of capabilityActions)')
     && clientSource.includes('loopActions.set')
@@ -136,6 +139,28 @@ check('循环设置可从模型窗口跳回 DSH 动作页',
   clientSource.includes("call('/ui-command')")
     && clientSource.includes('openLive2DSettings')
     && clientSource.includes('live2d:open-actions-settings'))
+check('动作保持与手动工具设置已进入设置页',
+  clientSource.includes("toggle('preserveIndependentHolds')")
+    && clientSource.includes("toggle('manualToolsEnabled')")
+    && clientSource.includes("toggle('moodTraceEnabled')")
+    && clientSource.includes("toggle('selfInspectEnabled')"))
+check('动作设计/调整区分 AI 与本地参数表',
+  clientSource.includes('AI 设计（消耗 Token）')
+    && clientSource.includes('自己设计（不消耗 Token）')
+    && clientSource.includes('AI 调整（消耗 Token）')
+    && clientSource.includes('自己调整（不消耗 Token）')
+    && clientSource.includes('预览未保存动作')
+    && clientSource.includes('峰值时间%'))
+check('自己设计动作提供独立模型窗口姿势设计器',
+  clientSource.includes("'/preset'")
+    && clientSource.includes("op: 'editor-open'")
+    && clientSource.includes('actionId: action?.id')
+    && clientSource.includes('打开独立姿势设计器')
+    && clientSource.includes('拖骨架调整'))
+check('已有自定义动作可直接载入姿势设计器修改',
+  clientSource.includes('customActions.map')
+    && clientSource.includes('编辑姿势')
+    && clientSource.includes('拖骨架修改每一步'))
 
 console.log('')
 if (failed > 0) {
