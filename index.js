@@ -4666,7 +4666,7 @@ export function designAction(label, description) {
  * 窗口要显示/播放的预设动作。
  *
  * 内置动作仍留在渲染层和 ANIM_WHITELIST 里，供摸头、生命感和旧调用使用；
- * 但它们按大肥鱼参数写死，不能作为跨模型菜单项展示。菜单只下发当前模型
+ * 但它们按某套模型的参数写死，不能作为跨模型菜单项展示。菜单只下发当前模型
  * 可验证的默认动作、模型自带能力，以及用户/AI 的自定义动作。
  */
 export function buildPresets(inst, profile = null) {
@@ -5676,7 +5676,7 @@ export const BUILTIN_ACTION_LABELS = {
 const BUILTIN_ACTION_IDS = new Set(ANIM_WHITELIST)
 
 // --- 动作词条库（0.4.0）-------------------------------------------------------
-// 起因：内置 12 个动作写死「大肥鱼」的参数（PARAM_EXP3~8 等），换到没这些参数的模型上，
+// 起因：内置 12 个动作写死某套模型的参数（PARAM_EXP3~8 等），换到没这些参数的模型上，
 // 缺轨被静默跳过 → 用户看到「动作做不出来」。改成词条库：每条只声明自己要哪几个逻辑参数，
 // 模型加载后按它的真实参数筛出「所有轨道都落得下」的，挑 10 条写进模型档案当默认动作。
 // pool 决定优先级：core（标准参数，人人有）> special（模型专属参数）> exp（表情贴图参数）。
@@ -5806,7 +5806,7 @@ export const ACTION_LIBRARY = [
       { param: 'pupilX', keys: [[0, 0], [0.25, 0.8], [0.6, -0.8], [1, 0]] },
       { param: 'pupilY', keys: [[0, 0], [0.25, 0.3], [0.6, -0.3], [1, 0]] },
     ] },
-  // 表情贴图池：靠模型的 EXP* 参数（大肥鱼这类模型有，很多模型没有 → 会自动跳过）
+  // 表情贴图池：靠模型的 EXP* 参数（部分模型有，很多模型没有 → 会自动跳过）
   { id: 'blush', label: '脸红', desc: '腮红贴图 + 歪头', pool: 'exp', durationMs: 3200,
     needs: ['blush'], tracks: [
       { param: 'blush', keys: [[0, 0], [0.12, 1], [0.86, 1], [1, 0]] },
@@ -5874,7 +5874,7 @@ const LIBRARY_PARAM_ALIASES = {
   pupilY: ['PupilY'],
   blush: ['PARAM_EXP4'],
   shockEye: ['PARAM_EXP5'],
-  // 大肥鱼实测：EXP3 = X 眼、EXP6 = 脸黑、EXP7 = 流口水（早期动作实现已验证过）
+  // 实测：EXP3 = X 眼、EXP6 = 脸黑、EXP7 = 流口水（早期动作实现已验证过）
   xeyes: ['PARAM_EXP3'],
   drool: ['PARAM_EXP7'],
   darkFace: ['PARAM_EXP6'],
@@ -5953,7 +5953,7 @@ export function pickDefaultActions(params, limit = 10, paramMeta = {}) {
   for (const entry of preferredBody.slice(0, 3)) take(entry)
   // 留 1 个名额给模型专属表情，避免身体动作增加后把 PARAM_EXP* 全部挤掉。
   for (const entry of core.slice(0, 6)) take(entry)
-  // 剩余名额：先补「表情类」（大肥鱼这类有 PARAM_EXP* 的模型），再补其它专属动作
+  // 剩余名额：先补「表情类」（有 PARAM_EXP* 的模型），再补其它专属动作
   const extraOrdered = [
     ...extra.filter((entry) => entry.pool === 'exp'),
     ...extra.filter((entry) => entry.pool !== 'exp'),
@@ -8868,7 +8868,7 @@ export function createLive2dTools(state, log) {
             instanceId: inst.id,
             profileId: profile?.id ?? null,
             profileLabel: profile?.label ?? null,
-            // 内置动作仍可被内部事件/AI 调用，但菜单已不再按大肥鱼皮套展示。
+            // 内置动作仍可被内部事件/AI 调用，但菜单已不再按某套模型展示。
             builtin: ANIM_WHITELIST.map((id) => ({ id, label: BUILTIN_ACTION_LABELS[id] ?? id })),
             defaultActions: (profile?.autoActions ?? [])
               .filter((item) => !customIds.has(item.id))
